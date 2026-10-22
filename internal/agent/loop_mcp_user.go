@@ -263,6 +263,7 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 		// triggers the runtime "grant revoked" path (visible in the original
 		// agent_brain_external screenshot).
 		hints := mcpbridge.ParseToolHints(srv.Settings)
+		verifies := mcpbridge.ParseVerifyWrites(srv.Settings)
 		var filteredOut []string
 		for _, mcpTool := range entry.MCPTools() {
 			if !mcpbridge.IsToolAllowed(mcpTool.Name, info.ToolAllow, info.ToolDeny) {
@@ -271,6 +272,7 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 			}
 			bt := mcpbridge.NewBridgeTool(srv.Name, mcpTool, entry.ClientPtr(), srv.ToolPrefix, srv.TimeoutSec, entry.Connected(), srv.ID, l.mcpGrantChecker).
 				WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
+				WithVerifyWrites(verifies).
 				WithForceReconnect(entry.RequestForceReconnect())
 			userTools = append(userTools, bt)
 		}

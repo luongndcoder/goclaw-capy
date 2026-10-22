@@ -109,14 +109,14 @@ func connectAndDiscover(ctx context.Context, name, transportType, command string
 // pass a zero-value ToolHints{} for config-path servers or when no hints are configured.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered out
 // upfront so the LLM never sees tools it cannot call. Pass nil for config-path servers.
-func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) error {
+func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, verifies map[string]VerifySpec, toolAllow, toolDeny []string) error {
 	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec)
 	if err != nil {
 		return err
 	}
 
 	// Register tools (filtered by grant's tool_allow/tool_deny upfront)
-	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, verifies, toolAllow, toolDeny)
 	ss.toolNames = registeredNames
 
 	// Cache tool descriptions + parameter schemas for prompt preview (no live connection needed)
@@ -164,7 +164,7 @@ func (m *Manager) connectServer(ctx context.Context, name, transportType, comman
 // never get a BridgeTool created — the LLM never sees them, eliminating the
 // "registered then runtime-denied" loop that produced repeated grant-revoked
 // errors. Pass nil/nil to register every discovered tool.
-func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, verifies map[string]VerifySpec, toolAllow, toolDeny []string) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range mcpTools {
@@ -175,6 +175,7 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 
 		bt := NewBridgeTool(serverName, mcpTool, &ss.clientPtr, toolPrefix, timeoutSec, &ss.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
+			WithVerifyWrites(verifies).
 			WithForceReconnect(func(reason string) { ss.requestForceReconnect(reason) })
 
 		if _, exists := m.registry.Get(bt.Name()); exists {
@@ -209,14 +210,14 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 // description hints from MCPServerData.Settings.tool_hints.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered
 // out upfront so the LLM never sees tools it cannot call.
-func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) error {
+func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, verifies map[string]VerifySpec, toolAllow, toolDeny []string) error {
 	entry, err := m.pool.Acquire(ctx, tenantID, name, transportType, command, args, env, url, headers, timeoutSec)
 	if err != nil {
 		return err
 	}
 
 	// Create per-agent BridgeTools from the pool's shared connection
-	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, verifies, toolAllow, toolDeny)
 
 	// Cache tool descriptions + parameter schemas for prompt preview (no live connection needed)
 	if serverID != uuid.Nil && m.store != nil && len(entry.tools) > 0 {
@@ -269,7 +270,7 @@ func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, 
 // hints.Global applies to all tools; hints.Tools[name] adds a per-tool hint.
 // toolAllow/toolDeny are evaluated via IsToolAllowed so filtered-out tools never
 // get a BridgeTool created (LLM never sees them).
-func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, verifies map[string]VerifySpec, toolAllow, toolDeny []string) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range entry.tools {
@@ -280,6 +281,7 @@ func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPref
 
 		bt := NewBridgeTool(serverName, mcpTool, &entry.state.clientPtr, toolPrefix, timeoutSec, &entry.state.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
+			WithVerifyWrites(verifies).
 			WithForceReconnect(entry.RequestForceReconnect())
 
 		if _, exists := m.registry.Get(bt.Name()); exists {

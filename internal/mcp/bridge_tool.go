@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -49,7 +50,8 @@ type BridgeTool struct {
 	clientPtr         *atomic.Pointer[mcpclient.Client] // shared with serverState for atomic swap on reconnect
 	timeoutSec        int
 	connected         *atomic.Bool
-	grantChecker      GrantChecker // for runtime grant recheck (nil = skip check)
+	grantChecker      GrantChecker          // for runtime grant recheck (nil = skip check)
+	verifyWrites      map[string]VerifySpec // auto-verify specs by mutating tool name (nil = off)
 	// forceReconnect triggers an out-of-band Initialize when Execute detects
 	// the server reset its session lifecycle. Optional — nil falls back to
 	// "connected=false + wait for health loop". Wired via WithForceReconnect.
@@ -132,6 +134,177 @@ func (t *BridgeTool) Parameters() map[string]any { return t.inputSchema }
 func (t *BridgeTool) WithForceReconnect(fn func(reason string)) *BridgeTool {
 	t.forceReconnect = fn
 	return t
+}
+
+// VerifySpec describes an automatic read-back after a mutating MCP tool
+// call succeeds. The read result is appended to the tool result so the model
+// reports from fresh evidence instead of memory — it can no longer claim a
+// write landed without a confirming read in context.
+//
+// Configured per server in MCPServerData.Settings JSON under the
+// "verify_writes" key:
+//
+//	{"verify_writes": {
+//	  "update_cells": {"tool": "get_sheet_data",
+//	    "args": {"spreadsheet_id": "$spreadsheet_id", "sheet": "$sheet", "range": "$range"},
+//	    "max_chars": 2000}}}
+//
+// Arg values referencing "$name" are copied from the mutating call's
+// (cleaned) args; only string values are carried over, missing refs are
+// omitted. If a required-looking ref (spreadsheet_id/id) is missing, the
+// verify read is skipped with a note telling the model to verify manually.
+type VerifySpec struct {
+	Tool     string            `json:"tool"`
+	Args     map[string]string `json:"args"`
+	MaxChars int               `json:"max_chars"`
+}
+
+// DefaultVerifyMaxChars bounds auto-verify read text appended to a tool
+// result (keeps one extra read from blowing up context).
+const DefaultVerifyMaxChars = 2000
+
+// MaxVerifyMaxChars caps an admin-configured max_chars.
+const MaxVerifyMaxChars = 8000
+
+// ParseVerifyWrites extracts per-tool verify specs from an MCP server's
+// Settings JSON. Returns nil when unconfigured or malformed (never errors —
+// a bad admin config must not break tool registration).
+func ParseVerifyWrites(settings json.RawMessage) map[string]VerifySpec {
+	if len(settings) == 0 {
+		return nil
+	}
+	var shape struct {
+		VerifyWrites map[string]VerifySpec `json:"verify_writes"`
+	}
+	if err := json.Unmarshal(settings, &shape); err != nil {
+		return nil
+	}
+	out := make(map[string]VerifySpec, len(shape.VerifyWrites))
+	for mutating, spec := range shape.VerifyWrites {
+		if strings.TrimSpace(mutating) == "" || strings.TrimSpace(spec.Tool) == "" {
+			continue
+		}
+		if spec.Tool == mutating {
+			continue // self-reference would be nonsense; skip
+		}
+		out[mutating] = spec
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// maxChars normalizes the truncation bound.
+func (s VerifySpec) maxChars() int {
+	if s.MaxChars <= 0 {
+		return DefaultVerifyMaxChars
+	}
+	if s.MaxChars > MaxVerifyMaxChars {
+		return MaxVerifyMaxChars
+	}
+	return s.MaxChars
+}
+
+// resolveVerifyArgs builds the read tool's args from the mutating call's
+// cleaned args. "$name" values copy the source arg when it exists and is
+// a string; anything else is omitted. It returns the ids of missing refs so
+// the caller can tell the model to verify manually instead.
+func resolveVerifyArgs(spec VerifySpec, src map[string]any) (map[string]any, []string) {
+	resolved := make(map[string]any, len(spec.Args))
+	var missing []string
+	for target, tmpl := range spec.Args {
+		if !strings.HasPrefix(tmpl, "$") || len(tmpl) < 2 {
+			resolved[target] = tmpl // literal passthrough (rare)
+			continue
+		}
+		v, ok := src[strings.TrimPrefix(tmpl, "$")]
+		s, isStr := v.(string)
+		if !ok || !isStr || strings.TrimSpace(s) == "" {
+			missing = append(missing, strings.TrimPrefix(tmpl, "$"))
+			continue
+		}
+		resolved[target] = s
+	}
+	return resolved, missing
+}
+
+// formatVerifySection renders a successful auto-verify read for the model.
+func formatVerifySection(readTool string, text string, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = DefaultVerifyMaxChars
+	}
+	if len(text) > maxChars {
+		text = text[:maxChars] + "\n…[truncated to " + strconv.Itoa(maxChars) + " chars]"
+	}
+	return "\n\n[Auto-verify] Re-read via " + readTool + " right after the write — " +
+		"this is what is actually stored now. Report to the user from this data, " +
+		"not from memory:\n" + text
+}
+
+// formatVerifyFailure renders an honest note when the write succeeded but
+// the confirming re-read did not — the model must not claim confirmation.
+func formatVerifyFailure(readTool string, svcErr error) string {
+	return "\n\n[Auto-verify FAILED: could not re-read via " + readTool + ": " +
+		svcErr.Error() + ". The write itself succeeded, but its effect is NOT " +
+		"confirmed. Call " + readTool + " manually and confirm before telling " +
+		"the user it is done.]"
+}
+
+// errVerifyNoClient / errVerifyErrorResult are sentinel reasons surfaced
+// when the auto-verify re-read cannot run or returns an error result.
+var (
+	errVerifyNoClient    = errors.New("no active client")
+	errVerifyErrorResult = errors.New("read tool returned an error result")
+)
+
+// WithVerifyWrites attaches per-tool auto-verify specs (see ParseVerifyWrites).
+// Nil or empty disables the feature. Chain after WithHints like the other
+// admin-authored server customizations.
+func (t *BridgeTool) WithVerifyWrites(specs map[string]VerifySpec) *BridgeTool {
+	t.verifyWrites = specs
+	return t
+}
+
+// runAutoVerify performs the configured read-back for a mutating tool call
+// that just succeeded. It uses a direct client call (never Execute, so no
+// recursion) with its own timeout.
+func (t *BridgeTool) runAutoVerify(ctx context.Context, spec VerifySpec, srcArgs map[string]any) string {
+	readArgs, missing := resolveVerifyArgs(spec, srcArgs)
+	if len(missing) > 0 {
+		return "\n\n[Auto-verify SKIPPED: missing arg(s) " + strings.Join(missing, ", ") +
+			" for the re-read. Call " + spec.Tool + " manually and confirm before " +
+			"telling the user it is done.]"
+	}
+	client := t.clientPtr.Load()
+	if client == nil {
+		return formatVerifyFailure(spec.Tool, errVerifyNoClient)
+	}
+	timeout := t.timeoutSec
+	if timeout <= 0 || timeout > 60 {
+		timeout = 60
+	}
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = spec.Tool
+	req.Params.Arguments = readArgs
+	result, err := client.CallTool(callCtx, req)
+	if err != nil {
+		slog.Warn("mcp.tool.call.auto_verify_failed",
+			"server", t.serverName, "tool", t.registeredName, "read_tool", spec.Tool,
+			"error", err.Error())
+		return formatVerifyFailure(spec.Tool, err)
+	}
+	if result.IsError {
+		slog.Warn("mcp.tool.call.auto_verify_error_result",
+			"server", t.serverName, "tool", t.registeredName, "read_tool", spec.Tool)
+		return formatVerifyFailure(spec.Tool, errVerifyErrorResult)
+	}
+	text := extractTextContent(result)
+	slog.Info("mcp.tool.call.auto_verified",
+		"server", t.serverName, "tool", t.registeredName, "read_tool", spec.Tool)
+	return formatVerifySection(spec.Tool, text, spec.maxChars())
 }
 
 // WithHints attaches admin-authored description hints to this tool. Hints are
@@ -325,6 +498,9 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 	// Wrap MCP tool results as external/untrusted content to prevent prompt injection.
 	// MCP servers may be third-party and return adversarial content.
 	wrapped := wrapMCPContent(text, t.serverName, t.toolName)
+	if spec, ok := t.verifyWrites[t.toolName]; ok && strings.TrimSpace(spec.Tool) != "" {
+		wrapped += t.runAutoVerify(ctx, spec, cleanedArgs)
+	}
 	return tools.NewResult(wrapped)
 }
 

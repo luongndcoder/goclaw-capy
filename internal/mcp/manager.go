@@ -29,7 +29,7 @@ const (
 	// mcpToolInlineMaxCount is the threshold above which MCP tools switch
 	// to search mode (deferred loading via mcp_tool_search) instead of
 	// being registered inline in the tool registry.
-	mcpToolInlineMaxCount = 40
+	mcpToolInlineMaxCount = 120
 )
 
 // ServerStatus reports the connection status of an MCP server.
@@ -231,7 +231,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		// Config-path servers have no DB-backed Settings, so no tool hints.
 		// Also no grant-based tool filtering (allow/deny are nil) — config
 		// trust model is that the operator gates which servers are enabled.
-		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil); err != nil {
+		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil, nil); err != nil {
 			slog.Warn("mcp.server.connect_failed", "server", name, "error", err)
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		} else {
@@ -410,18 +410,19 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 func (m *Manager) connectAndFilter(ctx context.Context, rs *resolvedServer) error {
 	srv := rs.info.Server
 	hints := ParseToolHints(srv.Settings)
+	verifies := ParseVerifyWrites(srv.Settings)
 
 	if m.pool != nil && !rs.hasUserCreds {
 		// Pool mode: acquire shared connection, create per-agent BridgeTools
 		tid := store.TenantIDFromContext(ctx)
 		return m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
-			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
+			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints, verifies,
 			rs.info.ToolAllow, rs.info.ToolDeny)
 	}
 	// Per-agent mode: create per-agent connection
 	return m.connectServer(ctx, srv.Name, srv.Transport, srv.Command,
 		rs.args, rs.env, srv.URL, rs.headers,
-		srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
+		srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints, verifies,
 		rs.info.ToolAllow, rs.info.ToolDeny)
 }
 
