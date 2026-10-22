@@ -3,12 +3,12 @@ package personal
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal/protocol"
+	"log/slog"
 )
 
 const maxTextLength = 2000
@@ -28,6 +28,9 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		ctrl.(*typing.Controller).Stop()
 	}
 
+	// Strip raw technical leakage before anything user-facing is built.
+	msg.Content = channels.SanitizeOutbound(msg.Content)
+
 	threadType := protocol.ThreadTypeUser
 	if c.IsGroupApproved(msg.ChatID) {
 		threadType = protocol.ThreadTypeGroup
@@ -39,7 +42,9 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	}
 
 	// Send media attachments.
-	for _, media := range msg.Media {
+	for i := range msg.Media {
+		media := &msg.Media[i]
+		media.Caption = channels.SanitizeOutbound(media.Caption)
 		if protocol.IsImageFile(media.URL) {
 			if err := c.sendImage(ctx, sess, msg.ChatID, threadType, media.URL, media.Caption); err != nil {
 				slog.Warn("zalo_personal: failed to send image", "path", media.URL, "error", err)

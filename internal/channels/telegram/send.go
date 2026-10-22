@@ -17,6 +17,7 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
 )
 
@@ -422,6 +423,7 @@ func (c *Channel) outboundMediaMaxBytes() int64 {
 // sendHTML sends a single HTML message, falling back to plain text if Telegram rejects the HTML.
 // replyTo and threadID are optional (0 = omit). General topic (1) is handled by resolveThreadIDForSend.
 func (c *Channel) sendHTML(ctx context.Context, chatID int64, htmlContent string, replyTo, threadID int) error {
+	htmlContent = channels.SanitizeOutbound(htmlContent)
 	return c.sendHTMLWithDepth(ctx, chatID, htmlContent, replyTo, threadID, 0)
 }
 
@@ -836,6 +838,7 @@ func (c *Channel) ReactToMessage(ctx context.Context, chatID string, messageID i
 
 // editMessageCaption edits the caption of a media message (photo/document).
 func (c *Channel) editMessageCaption(ctx context.Context, chatID int64, messageID int, htmlCaption string) error {
+	htmlCaption = channels.SanitizeOutbound(htmlCaption)
 	editCap := &telego.EditMessageCaptionParams{
 		ChatID:    tu.ID(chatID),
 		MessageID: messageID,
@@ -860,7 +863,7 @@ func (c *Channel) PostToTopic(ctx context.Context, chatID string, threadID int, 
 	if err != nil {
 		return 0, fmt.Errorf("invalid telegram chat id %q: %w", chatID, err)
 	}
-	msg := tu.Message(tu.ID(id), markdownToTelegramHTML(content))
+	msg := tu.Message(tu.ID(id), markdownToTelegramHTML(channels.SanitizeOutbound(content)))
 	msg.ParseMode = telego.ModeHTML
 	if threadID > 0 {
 		msg.MessageThreadID = threadID
@@ -882,6 +885,7 @@ func (c *Channel) PostToTopic(ctx context.Context, chatID string, threadID int, 
 // editMessage edits an existing message's text.
 // Uses retrySend since edits are idempotent and may fail on transient network issues.
 func (c *Channel) editMessage(ctx context.Context, chatID int64, messageID int, htmlText string) error {
+	htmlText = channels.SanitizeOutbound(htmlText)
 	editMsg := tu.EditMessageText(tu.ID(chatID), messageID, htmlText)
 	editMsg.ParseMode = telego.ModeHTML
 
