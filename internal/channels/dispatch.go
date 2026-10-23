@@ -147,6 +147,12 @@ func (m *Manager) deliverOutbound(ctx context.Context, msg bus.OutboundMessage) 
 	defer m.releaseTempMedia(claimed)
 	msg.Media = kept
 
+	// Centralized sanitizer: apply SanitizeOutbound to all outgoing channel messages
+	// (final answers, intermediate progress, tool block replies, quick acks, error fallbacks).
+	if msg.Content != "" {
+		msg.Content = SanitizeOutbound(msg.Content)
+	}
+
 	// If only media was in this message and every file is gone, skip entirely.
 	// Exception: empty content carrying placeholder routing metadata is the
 	// agent loop's NO_REPLY / silent-reply cleanup signal — channels such as

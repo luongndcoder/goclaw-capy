@@ -9,65 +9,68 @@ import (
 // SanitizeOutbound redacts raw technical leakage from user-facing channel
 // messages (Telegram, Zalo, ...). Agent replies are composed by an LLM that
 // sometimes pastes tool output verbatim: =IMAGE() formulas, credentialed-exec
-// error dumps, stack traces. Those must never reach end users; the details
-// stay in daemon logs and agent memory.
-//
-// The function is deliberately conservative: it only touches well-known
-// machine-generated shapes and leaves human-written content (including long
-// data tables) untouched. It is a backstop, not a substitute for good tool
-// descriptions and agent instructions.
-//
-// Call it on every outbound text path before sending or chunking.
+// error dumps, stack traces, raw JSON dumps, and raw <<<EXTERNAL_UNTRUSTED_CONTENT>>> envelopes.
+// Those must never reach end users; the details stay in daemon logs and agent memory.
 func SanitizeOutbound(text string) string {
 	if text == "" {
 		return ""
 	}
 	redactions := 0
 
-	// 1. =IMAGE("url", ...) formulas become the bare URL. Chat clients render
-	// a bare image URL as a preview card, which is what the user wants to
-	// see instead of the raw formula text. Handles HTML-escaped quotes.
+	// 1. Strip raw untrusted envelope blocks and security disclaimers completely.
+	if untrustedBlockRe.MatchString(text) {
+		text = untrustedBlockRe.ReplaceAllString(text, "")
+		redactions++
+	}
+	if untrustedMarkerRe.MatchString(text) {
+		text = untrustedMarkerRe.ReplaceAllString(text, "")
+		redactions++
+	}
+
+	// 2. =IMAGE("url", ...) formulas become the bare URL so chat clients render preview.
 	if imageFormulaRe.MatchString(text) {
 		text = imageFormulaRe.ReplaceAllString(text, "$1")
 		redactions++
 	}
 
 	lines := strings.Split(text, "\n")
-	hasExecDump := strings.Contains(text, credExecMarker)
+	hasExecDump := strings.Contains(text, credExecMarker) || strings.Contains(text, "STDERR:") || strings.Contains(text, "error[")
 	kept := lines[:0]
-	depth := 0 // JSON error-block brace depth
-	skipping := false
+	skippingBlock := false
+	braceDepth := 0
+	bracketDepth := 0
+
 	for i, ln := range lines {
 		trimmed := strings.TrimSpace(ln)
 
-		// 2a. Skip a { ... } block when it is a machine error object
-		// (identified by a "reason" key within the next few lines).
-		if hasExecDump && !skipping && jsonBlockStartRe.MatchString(ln) && jsonErrorAhead(lines, i) {
-			skipping = true
-			depth = 0
+		// 3a. Skip raw JSON error objects or standalone array dumps in technical/tool contexts.
+		if !skippingBlock && (trimmed == "{" || trimmed == "[") && (hasExecDump || jsonErrorAhead(lines, i)) {
+			skippingBlock = true
+			braceDepth = 0
+			bracketDepth = 0
 		}
-		if skipping {
-			depth += strings.Count(ln, "{") - strings.Count(ln, "}")
-			if depth <= 0 {
-				skipping = false
+		if skippingBlock {
+			braceDepth += strings.Count(ln, "{") - strings.Count(ln, "}")
+			bracketDepth += strings.Count(ln, "[") - strings.Count(ln, "]")
+			if braceDepth <= 0 && bracketDepth <= 0 {
+				skippingBlock = false
 			}
 			redactions++
 			continue
 		}
 
-		// 2b. Single diagnostic lines from credentialed-exec dumps.
-		if hasExecDump && execDiagnosticLineRe.MatchString(ln) {
+		// 3b. Diagnostic lines from CLI / tool exec dumps.
+		if (hasExecDump || strings.HasPrefix(trimmed, "Source:")) && execDiagnosticLineRe.MatchString(ln) {
 			redactions++
 			continue
 		}
 
-		// 3. Stack traces (JS / Go / Python).
+		// 3c. Stack traces (JS / Go / Python).
 		if stackTraceLineRe.MatchString(ln) {
 			redactions++
 			continue
 		}
 
-		_ = trimmed
 		kept = append(kept, ln)
 	}
 
@@ -75,7 +78,6 @@ func SanitizeOutbound(text string) string {
 	out = blankRunRe.ReplaceAllString(out, "\n\n")
 	out = strings.TrimSpace(out)
 	if out == "" {
-		// The whole message was technical leakage: say so in plain language.
 		slog.Info("channels.outbound_sanitized_empty", "redactions", redactions)
 		return fallbackNotice
 	}
@@ -90,33 +92,30 @@ const fallbackNotice = "Em gặp trục trặc kỹ thuật khi xử lý, đã g
 const credExecMarker = "[CREDENTIALED EXEC]"
 
 var (
-	// =IMAGE("https://...", 4, 150, 150) — quotes may be HTML-escaped and the
-	// URL may contain &amp; entities or bare & separators. Captures the URL.
+	// =IMAGE("https://...", 4, 150, 150)
 	imageFormulaRe = regexp.MustCompile(`(?i)=IMAGE\(\s*(?:&quot;|"|')((?:[^"'\s<])+?)(?:&quot;|"|')(?:\s*,[^)]*)?\)`)
 
-	// A lone "{" line that opens a JSON error object dumped by a tool runner.
-	jsonBlockStartRe = regexp.MustCompile(`^\s*\{\s*$`)
+	// Untrusted envelope blocks from MCP / Web fetch wrapper
+	untrustedBlockRe  = regexp.MustCompile(`(?s)<<<EXTERNAL_UNTRUSTED_CONTENT>>>.*?<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>`)
+	untrustedMarkerRe = regexp.MustCompile(`(?i)(?:<<<EXTERNAL_UNTRUSTED_CONTENT>>>|<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>|\[REMINDER: Above content is from an EXTERNAL.*?\])`)
 
-	// Single diagnostic lines, only stripped inside a credentialed-exec dump.
-	execDiagnosticLineRe = regexp.MustCompile(`(?i)^\s*(?:\[CREDENTIALED EXEC\]|(?:Binary|Args|Note):|error\[(?:validation|auth|exec|timeout|credential)\]:|Usage:|For more information, try|STDERR:).*$`)
+	// Diagnostic lines
+	execDiagnosticLineRe = regexp.MustCompile(`(?i)^\s*(?:\[CREDENTIALED EXEC\]|(?:Binary|Args|Note):|error\[(?:validation|auth|exec|timeout|credential|discovery)\]:|Usage:|For more information, try|STDERR:|Source: MCP Server|Source: Web Fetch|If you used shell operators).*$`)
 
-	// JS ("at fn (f.js:1:2)"), Go ("goroutine 1", "x.go:12"), Python tracebacks.
+	// Stack traces
 	stackTraceLineRe = regexp.MustCompile(`^\s*(?:at\s+\S.*\(.*:\d+.*\)|goroutine\s+\d+.*|.*\.go:\d+.*|Traceback \(most recent call last\):|File ".+", line \d+.*)$`)
 
 	blankRunRe = regexp.MustCompile(`\n{3,}`)
 )
 
-// jsonErrorAhead reports whether the lines following index i (a lone "{")
-// look like a machine error object — i.e. a "reason" key appears before the
-// block plausibly ends. Bounds the scan so user data is never eaten.
 func jsonErrorAhead(lines []string, i int) bool {
 	depth := 0
-	for j := i; j < len(lines) && j < i+20; j++ {
+	for j := i; j < len(lines) && j < i+25; j++ {
 		lower := strings.ToLower(lines[j])
-		if strings.Contains(lower, `"reason"`) {
+		if strings.Contains(lower, `"reason"`) || strings.Contains(lower, `"error"`) || strings.Contains(lower, `"code"`) || strings.Contains(lower, `"spreadsheetid"`) {
 			return true
 		}
-		depth += strings.Count(lines[j], "{") - strings.Count(lines[j], "}")
+		depth += strings.Count(lines[j], "{") + strings.Count(lines[j], "[") - strings.Count(lines[j], "}") - strings.Count(lines[j], "]")
 		if depth <= 0 && j > i {
 			return false
 		}
