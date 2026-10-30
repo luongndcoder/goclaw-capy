@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
@@ -30,31 +31,33 @@ type Channel struct {
 	config            config.TelegramConfig
 	httpClient        *http.Client
 	transport         *http.Transport
-	ipv4Once          sync.Once                   // guards enableIPv4Only to prevent data race
-	agentStore        store.AgentStore            // for agent key lookup (nil if not configured)
-	configPermStore   store.ConfigPermissionStore // for group file writer management (nil if not configured)
-	teamStore         store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
-	subagentTaskStore store.SubagentTaskStore     // for /subagents, /subagent commands (nil if not configured)
-	placeholders      sync.Map                    // localKey string → messageID int
-	stopThinking      sync.Map                    // localKey string → *thinkingCancel
-	typingCtrls       sync.Map                    // localKey string → *typing.Controller
-	reactions         sync.Map                    // localKey string → *StatusReactionController
-	threadIDs         sync.Map                    // localKey string → messageThreadID int (for forum topic routing)
-	mentionMode       string                      // "strict" (default) or "yield"
-	triggerWords      map[string]struct{}         // cached, normalized agent trigger-words from IDENTITY.md; whole-word, case-insensitive
-	triggerWordsAt    time.Time                   // when triggerWords was last refreshed
-	triggerMu         sync.Mutex                  // guards triggerWords/triggerWordsAt
-	botDisplayName    string                      // bot's first_name from GetMe (e.g. "ViệtBot"); captured once at Start
-	pollCtx           context.Context             // long-polling context (cancelled by pollCancel); promoted from Start-local so background helpers (e.g. albumAggregator) can derive from it
-	pollCancel        context.CancelFunc          // cancels the long polling context
-	pollDone          chan struct{}               // closed when polling goroutine exits
-	handlerWg         sync.WaitGroup              // tracks in-flight handler goroutines for graceful shutdown
-	handlerSem        chan struct{}               // bounded semaphore for concurrent handler goroutines
-	pendingDraftID    sync.Map                    // localKey string → int (draftID)
-	audioMgr          *audio.Manager              // unified STT via audio.Manager (nil = no STT)
-	albumAgg          *albumAggregator            // coalesces Telegram album members into a single dispatch; nil before Start
-	writerHealMu      sync.Mutex                  // guards writerHealLastTry for /writers self-heal
-	writerHealLastTry map[string]time.Time        // key "chatID|userID" → last attempt timestamp
+	ipv4Once          sync.Once                    // guards enableIPv4Only to prevent data race
+	agentStore        store.AgentStore             // for agent key lookup (nil if not configured)
+	configPermStore   store.ConfigPermissionStore  // for group file writer management (nil if not configured)
+	teamStore         store.TeamStore              // for /tasks, /task_detail commands (nil if not configured)
+	subagentTaskStore store.SubagentTaskStore      // for /subagents, /subagent commands (nil if not configured)
+	placeholders      sync.Map                     // localKey string → messageID int
+	answeredIDs       *lru.Cache[string, struct{}] // "chatID:msgID" recently answered (edit routing)
+	answeredMu        sync.Mutex                   // guards answeredIDs lazy init
+	stopThinking      sync.Map                     // localKey string → *thinkingCancel
+	typingCtrls       sync.Map                     // localKey string → *typing.Controller
+	reactions         sync.Map                     // localKey string → *StatusReactionController
+	threadIDs         sync.Map                     // localKey string → messageThreadID int (for forum topic routing)
+	mentionMode       string                       // "strict" (default) or "yield"
+	triggerWords      map[string]struct{}          // cached, normalized agent trigger-words from IDENTITY.md; whole-word, case-insensitive
+	triggerWordsAt    time.Time                    // when triggerWords was last refreshed
+	triggerMu         sync.Mutex                   // guards triggerWords/triggerWordsAt
+	botDisplayName    string                       // bot's first_name from GetMe (e.g. "ViệtBot"); captured once at Start
+	pollCtx           context.Context              // long-polling context (cancelled by pollCancel); promoted from Start-local so background helpers (e.g. albumAggregator) can derive from it
+	pollCancel        context.CancelFunc           // cancels the long polling context
+	pollDone          chan struct{}                // closed when polling goroutine exits
+	handlerWg         sync.WaitGroup               // tracks in-flight handler goroutines for graceful shutdown
+	handlerSem        chan struct{}                // bounded semaphore for concurrent handler goroutines
+	pendingDraftID    sync.Map                     // localKey string → int (draftID)
+	audioMgr          *audio.Manager               // unified STT via audio.Manager (nil = no STT)
+	albumAgg          *albumAggregator             // coalesces Telegram album members into a single dispatch; nil before Start
+	writerHealMu      sync.Mutex                   // guards writerHealLastTry for /writers self-heal
+	writerHealLastTry map[string]time.Time         // key "chatID|userID" → last attempt timestamp
 	// pairingService, approvedGroups, pairingDebounce, groupHistory, historyLimit, requireMention
 	// are inherited from channels.BaseChannel.
 }
@@ -243,8 +246,12 @@ func (c *Channel) Start(ctx context.Context) error {
 			"message",
 			"edited_message",
 			"channel_post",
+			"edited_channel_post",
 			"callback_query",
 			"my_chat_member",
+			"message_reaction",
+			"poll",
+			"poll_answer",
 		},
 	})
 	if err != nil {
@@ -322,6 +329,29 @@ func (c *Channel) Start(ctx context.Context) error {
 					case <-pollCtx.Done():
 						return
 					}
+				} else if edited := c.answeredEdit(update); edited != nil {
+					// Edits keep Telegram's original message_id: only route edits
+					// of messages that already got an agent turn (typo fixes and
+					// follow-up corrections). Fresh edits of unanswered messages
+					// stay skipped — nothing was promised yet.
+					update.Message = edited
+					select {
+					case c.handlerSem <- struct{}{}:
+						c.handlerWg.Add(1)
+						go func(u telego.Update) {
+							defer c.handlerWg.Done()
+							defer func() { <-c.handlerSem }()
+							defer func() {
+								if r := recover(); r != nil {
+									slog.Error("telegram: handleMessage panic recovered",
+										"channel", c.Name(), "panic", r, "stack", string(debug.Stack()))
+								}
+							}()
+							c.handleMessage(pollCtx, u)
+						}(update)
+					case <-pollCtx.Done():
+						return
+					}
 				} else if update.CallbackQuery != nil {
 					select {
 					case c.handlerSem <- struct{}{}:
@@ -339,13 +369,21 @@ func (c *Channel) Start(ctx context.Context) error {
 					updateType := "unknown"
 					switch {
 					case update.EditedMessage != nil:
-						updateType = "edited_message"
+						updateType = "edited_message_unanswered"
 					case update.ChannelPost != nil:
 						updateType = "channel_post"
 					case update.MyChatMember != nil:
 						updateType = "my_chat_member"
 					case update.ChatMember != nil:
 						updateType = "chat_member"
+					case update.MessageReaction != nil:
+						updateType = "message_reaction"
+					case update.MessageReactionCount != nil:
+						updateType = "message_reaction_count"
+					case update.Poll != nil:
+						updateType = "poll"
+					case update.PollAnswer != nil:
+						updateType = "poll_answer"
 					}
 					slog.Debug("telegram update skipped (no message)", "type", updateType, "update_id", update.UpdateID)
 				}

@@ -475,6 +475,9 @@ func (c *Channel) processResolvedMessage(ctx context.Context, rctx resolvedMessa
 	if user == nil {
 		return
 	}
+	// Record the answered ID so a later edit of this exact message routes as
+	// a follow-up instead of vanishing into the skip branch.
+	c.markAnswered(rep.Chat.ID, rep.MessageID)
 	content := rctx.content
 
 	// --- Media download (only when bot will process the message) ---
