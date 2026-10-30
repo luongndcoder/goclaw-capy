@@ -83,6 +83,12 @@ func (c *DefaultClassifier) Classify(err error, statusCode int, body string) Fai
 	// HTTP status-based classification
 	switch {
 	case statusCode == 429:
+		// Quota-exhausted 429s carry billing bodies — they must not be
+		// retried as rate limits (retry storm + wrong cooldown). Check the
+		// body before falling through to FailoverRateLimit.
+		if containsAny(lower, "credit balance", "insufficient_quota", "insufficient quota", "quota_exceeded", "exceeded your current quota", "billing") {
+			return classifyReason(FailoverBilling)
+		}
 		return classifyReason(FailoverRateLimit)
 	case statusCode == 402:
 		return classifyReason(FailoverBilling)

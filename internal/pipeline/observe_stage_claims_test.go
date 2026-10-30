@@ -47,6 +47,7 @@ func TestObserveStage_FabricationGuard_BlocksWithoutWrite(t *testing.T) {
 	stage := NewObserveStage(deps)
 	st := defaultState()
 	st.Ctx = context.Background()
+	st.Tool.TotalToolCalls = 2 // tools ran (reads), but no write succeeded
 	st.Think.LastResponse = &providers.ChatResponse{Content: "Xong rồi anh, em đã xử lý xong"}
 	if err := stage.Execute(t.Context(), st); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -56,6 +57,47 @@ func TestObserveStage_FabricationGuard_BlocksWithoutWrite(t *testing.T) {
 	}
 	if st.Observe.FinalContent != "" {
 		t.Fatalf("blocked content must not become final, got %q", st.Observe.FinalContent)
+	}
+}
+
+// TestObserveStage_FabricationGuard_ExemptsPureQA ensures read-only politeness
+// ("hoàn thành" with zero tool calls) is not taxed with retry turns.
+func TestObserveStage_FabricationGuard_ExemptsPureQA(t *testing.T) {
+	t.Parallel()
+	stage := NewObserveStage(&PipelineDeps{})
+	st := defaultState()
+	st.Ctx = context.Background()
+	st.Tool.TotalToolCalls = 0 // pure Q&A, no tools at all
+	st.Think.LastResponse = &providers.ChatResponse{Content: "Em đã hoàn thành việc đọc file rồi nhé"}
+	if err := stage.Execute(t.Context(), st); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if st.Observe.ContinueAfterFinal {
+		t.Fatal("pure-Q&A closing must not be blocked")
+	}
+	if st.Observe.FinalContent == "" {
+		t.Fatal("pure-Q&A closing must become final content")
+	}
+}
+
+// TestObserveStage_GuardSurrendersUnverified proves guards never surrender
+// silently: past the block cap the claim ships with an unverified label.
+func TestObserveStage_GuardSurrendersUnverified(t *testing.T) {
+	t.Parallel()
+	stage := NewObserveStage(&PipelineDeps{})
+	st := defaultState()
+	st.Ctx = context.Background()
+	st.Tool.TotalToolCalls = 2
+	st.Observe.FabricationBlocks = maxGuardBlocks // cap already reached
+	st.Think.LastResponse = &providers.ChatResponse{Content: "Xong rồi anh, em đã xử lý xong"}
+	if err := stage.Execute(t.Context(), st); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if st.Observe.ContinueAfterFinal {
+		t.Fatal("capped guard must not retry forever")
+	}
+	if !strings.HasPrefix(st.Observe.FinalContent, unverifiedNotice) {
+		t.Fatalf("capped claim must carry unverified label, got %q", st.Observe.FinalContent)
 	}
 }
 

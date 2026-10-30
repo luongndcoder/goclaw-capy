@@ -242,6 +242,13 @@ func (s *SQLiteCronStore) executeOneJob(job store.CronJob, handler func(job *sto
 	startTime := time.Now()
 
 	var lastResult *store.CronJobResult
+	// Single attempt for agent turns (internal retries already cover
+	// transport; whole-turn reruns duplicate side effects). Command payloads
+	// keep configured retries. Mirrors pg/cron_scheduler.go.
+	retryCfg := s.retryCfg
+	if !job.Payload.IsCommand() {
+		retryCfg.MaxRetries = 0
+	}
 	resultStr, attempts, err := cron.ExecuteWithRetry(func() (string, error) {
 		r, e := handler(&job)
 		if e != nil {
@@ -252,7 +259,7 @@ func (s *SQLiteCronStore) executeOneJob(job store.CronJob, handler func(job *sto
 			return r.Content, nil
 		}
 		return "", nil
-	}, s.retryCfg)
+	}, retryCfg)
 
 	durationMS := time.Since(startTime).Milliseconds()
 

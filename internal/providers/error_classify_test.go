@@ -15,6 +15,24 @@ func TestClassifyHTTP429RateLimit(t *testing.T) {
 	}
 }
 
+// TestClassifyHTTP429BillingBody verifies quota-exhausted 429s are NOT
+// retried as rate limits: they carry billing bodies and must get the billing
+// cooldown instead of the retry storm.
+func TestClassifyHTTP429BillingBody(t *testing.T) {
+	classifier := NewDefaultClassifier()
+	bodies := []string{
+		`{"error": {"message": "You exceeded your current quota, please check your plan and billing details.", "type": "insufficient_quota"}}`,
+		`{"error": {"code": "insufficient_quota", "message": "quota exceeded"}}`,
+		"Your credit balance is too low to access the API",
+	}
+	for _, body := range bodies {
+		result := classifier.Classify(errors.New("wrapped"), 429, body)
+		if result.Reason != FailoverBilling {
+			t.Errorf("expected FailoverBilling for %q, got %s", body, result.Reason)
+		}
+	}
+}
+
 func TestClassifyHTTP402Billing(t *testing.T) {
 	classifier := NewDefaultClassifier()
 	result := classifier.Classify(nil, 402, "Payment required")

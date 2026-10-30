@@ -75,6 +75,10 @@ type PipelineDeps struct {
 	PruneMessages   func(msgs []providers.Message, budget int) ([]providers.Message, PruneStats)
 	SanitizeHistory func(msgs []providers.Message) ([]providers.Message, int)
 	CompactMessages func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error)
+	// PersistCompactedHistory writes a mid-loop compaction back to the session
+	// store synchronously so a crash/restart cannot lose it. Nil = persist
+	// disabled (in-memory only, legacy behavior).
+	PersistCompactedHistory func(ctx context.Context, sessionKey string, compacted []providers.Message) error
 
 	// Cache-TTL gate callbacks (Phase 06). All optional (nil = feature disabled).
 	GetProviderCaps  func() providers.ProviderCapabilities // provider capabilities for cache detection

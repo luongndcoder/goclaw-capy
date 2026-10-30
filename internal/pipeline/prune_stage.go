@@ -212,6 +212,17 @@ func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 		state.Compact.CompactionCount++
 		state.Compact.MemoryFlushedThisCycle = false // reset for next cycle
 
+		// Persist the compaction synchronously: without this a crash/restart
+		// silently discards it and the next turn re-pays for another LLM
+		// compaction (or overflows). A persist failure must not kill a
+		// healthy run, but it is loud.
+		if s.deps.PersistCompactedHistory != nil && sessionKey != "" {
+			if perr := s.deps.PersistCompactedHistory(ctx, sessionKey, compacted); perr != nil {
+				slog.Warn("prune: compacted history persist failed",
+					"session_key", sessionKey, "error", perr)
+			}
+		}
+
 		historyTokens = s.countHistory(state)
 		state.Prune.HistoryTokens = historyTokens
 	}

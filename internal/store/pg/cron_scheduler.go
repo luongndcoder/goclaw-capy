@@ -241,8 +241,16 @@ func (s *PGCronStore) executeOneJob(job store.CronJob, handler func(job *store.C
 
 	startTime := time.Now()
 
-	// Wrap handler to fit ExecuteWithRetry's (string, error) signature
+	// Wrap handler to fit ExecuteWithRetry's (string, error) signature.
+	// Agent-turn jobs run single-attempt: the turn already retries internally
+	// (provider RetryDo + model fallback), and re-running a whole turn
+	// duplicates side effects while only the last success is delivered.
+	// Deterministic command payloads keep the configured retries.
 	var lastResult *store.CronJobResult
+	retryCfg := s.retryCfg
+	if !job.Payload.IsCommand() {
+		retryCfg.MaxRetries = 0
+	}
 	resultStr, attempts, err := cron.ExecuteWithRetry(func() (string, error) {
 		r, e := handler(&job)
 		if e != nil {
@@ -253,7 +261,7 @@ func (s *PGCronStore) executeOneJob(job store.CronJob, handler func(job *store.C
 			return r.Content, nil
 		}
 		return "", nil
-	}, s.retryCfg)
+	}, retryCfg)
 
 	durationMS := time.Since(startTime).Milliseconds()
 

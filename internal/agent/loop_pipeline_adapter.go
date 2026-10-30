@@ -126,6 +126,13 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		PruneMessages:   cb.pruneMessages,
 		SanitizeHistory: cb.sanitizeHistory,
 		CompactMessages: cb.compactMessages,
+		PersistCompactedHistory: func(ctx context.Context, sessionKey string, compacted []providers.Message) error {
+			if l.sessions == nil {
+				return nil
+			}
+			l.sessions.SetHistory(ctx, sessionKey, compacted)
+			return l.sessions.Save(ctx, sessionKey)
+		},
 
 		// Cache-TTL gate callbacks (Phase 06)
 		GetProviderCaps: func() providers.ProviderCapabilities {

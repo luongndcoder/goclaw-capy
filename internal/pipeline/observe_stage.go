@@ -54,6 +54,30 @@ func (s *ObserveStage) Execute(_ context.Context, state *RunState) error {
 	return nil
 }
 
+// maxGuardBlocks caps block-and-retry per run for the async and fabrication
+// gates. Past the cap the claim is delivered with unverifiedNotice, never as
+// a false confirmation.
+const maxGuardBlocks = 3
+
+// unverifiedNotice prefixes a completion claim that survived all guard
+// retries without producing tool evidence. The user sees honesty ("not yet
+// verified") instead of a fabricated "done".
+const unverifiedNotice = "⚠️ Chưa xác minh: hệ thống chưa thấy bằng chứng đã làm xong việc dưới đây.\n\n"
+
+// blockFinal records a blocked final response and injects the retry
+// instruction so the model gets another turn to ground its claim.
+func (s *ObserveStage) blockFinal(state *RunState, content, thinking, reason string) {
+	state.Messages.AppendPending(providers.Message{
+		Role:     "assistant",
+		Content:  content,
+		Thinking: thinking,
+	})
+	state.Messages.AppendPending(providers.Message{Role: "user", Content: reason})
+	state.Observe.BlockedByHook = true
+	state.Observe.HookRejectionReason = reason
+	state.Observe.ContinueAfterFinal = true
+}
+
 func (s *ObserveStage) drainInjectedMessages() []providers.Message {
 	if s.deps.DrainInjectCh == nil {
 		return nil
@@ -71,29 +95,31 @@ func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.Cha
 	// announcement arrived), so the claim cannot be grounded — block it and
 	// point at the retrieval tool. Honest progress reports ("đã giao việc,
 	// có kết quả sẽ báo") carry no completion claim and pass through.
-	if len(injected) == 0 && state.Observe.FabricationBlocks < 3 &&
+	// Past the block cap the claim is delivered with an "unverified" label
+	// instead of a false confirmation (never surrender silently).
+	if len(injected) == 0 &&
 		claimsWriteCompletion(content) && state.Tool.AsyncOutstanding > 0 {
-		state.Observe.FabricationBlocks++
-		state.Messages.AppendPending(providers.Message{
-			Role:     "assistant",
-			Content:  content,
-			Thinking: thinking,
-		})
-		reason := "CHƯA XONG: bạn đã giao việc cho subagent chạy nền nhưng chưa lấy kết quả " +
-			"(còn " + strconv.Itoa(state.Tool.AsyncOutstanding) + " việc chưa thu hồi). " +
-			"Hãy gọi spawn(action=\"get\", completion_id=\"...\") để lấy kết quả thật, " +
-			"đối chiếu rồi mới báo hoàn thành. Nếu việc nền chưa xong, hãy nói thật với " +
-			"người dùng là đang chờ thay vì báo đã xong."
-		state.Messages.AppendPending(providers.Message{Role: "user", Content: reason})
-		state.Observe.BlockedByHook = true
-		state.Observe.HookRejectionReason = reason
-		state.Observe.ContinueAfterFinal = true
-		slog.Warn("async_guard.blocked",
+		if state.Observe.FabricationBlocks < maxGuardBlocks {
+			state.Observe.FabricationBlocks++
+			reason := "CHƯA XONG: bạn đã giao việc cho subagent chạy nền nhưng chưa lấy kết quả " +
+				"(còn " + strconv.Itoa(state.Tool.AsyncOutstanding) + " việc chưa thu hồi). " +
+				"Hãy gọi spawn(action=\"get\", completion_id=\"...\") để lấy kết quả thật, " +
+				"đối chiếu rồi mới báo hoàn thành. Nếu việc nền chưa xong, hãy nói thật với " +
+				"người dùng là đang chờ thay vì báo đã xong."
+			s.blockFinal(state, content, thinking, reason)
+			slog.Warn("async_guard.blocked",
+				"session", state.Input.SessionKey,
+				"agent", store.AgentIDFromContext(state.Ctx),
+				"outstanding", state.Tool.AsyncOutstanding,
+				"content_preview", truncateForLog(content, 120))
+			return
+		}
+		content = unverifiedNotice + content
+		slog.Warn("async_guard.surrendered_unverified",
 			"session", state.Input.SessionKey,
 			"agent", store.AgentIDFromContext(state.Ctx),
 			"outstanding", state.Tool.AsyncOutstanding,
-			"content_preview", truncateForLog(content, 120))
-		return
+			"content_preview", truncateForLog(content, 160))
 	}
 
 	// ── Fabrication guard ────────────────────────────────────────────
@@ -101,30 +127,35 @@ func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.Cha
 	// executed no write tool at all (verified incident: only get_sheet_data
 	// was called, yet the reply said "đã áp dụng định dạng,
 	// đã đặt QR..."). Block such a reply and retry truthfully.
-	if len(injected) == 0 && state.Observe.FabricationBlocks < 3 &&
-		claimsWriteCompletion(content) && len(state.Tool.WriteToolsUsed) == 0 {
-		state.Observe.FabricationBlocks++
-		state.Messages.AppendPending(providers.Message{
-			Role:     "assistant",
-			Content:  content,
-			Thinking: thinking,
-		})
-		reason := "PHÁT HIỆN BỊA ĐẶT: bạn vừa nói đã cập nhật/định dạng/thêm/sửa dữ liệu, " +
-			"NHƯNG trong lượt này bạn KHÔNG hề gọi bất kỳ công cụ ghi nào (update_cells, " +
-			"set_number_format, format_sheet_range, append_rows, write_file...). Bạn chỉ " +
-			"đọc dữ liệu. Hãy THỰC SỰ gọi công cụ ghi để làm việc đó, sau đó đọc lại để " +
-			"xác nhận, rồi mới báo hoàn thành. Nếu chưa làm được, hãy nói thật với người " +
-			"dùng là chưa thực hiện."
-		state.Messages.AppendPending(providers.Message{Role: "user", Content: reason})
-		state.Observe.BlockedByHook = true
-		state.Observe.HookRejectionReason = reason
-		state.Observe.ContinueAfterFinal = true
-		slog.Warn("fabrication_guard.blocked",
+	// Exemption: a run with zero tool calls is pure Q&A — generic closings
+	// ("hoàn thành", "xong rồi") there are politeness, not write claims.
+	// Past the block cap the claim is delivered with an "unverified" label
+	// instead of a false confirmation (never surrender silently).
+	if len(injected) == 0 &&
+		claimsWriteCompletion(content) && len(state.Tool.WriteToolsUsed) == 0 &&
+		state.Tool.TotalToolCalls > 0 {
+		if state.Observe.FabricationBlocks < maxGuardBlocks {
+			state.Observe.FabricationBlocks++
+			reason := "PHÁT HIỆN BỊA ĐẶT: bạn vừa nói đã cập nhật/định dạng/thêm/sửa dữ liệu, " +
+				"NHƯNG trong lượt này bạn KHÔNG hề gọi bất kỳ công cụ ghi nào (update_cells, " +
+				"set_number_format, format_sheet_range, append_rows, write_file...). Bạn chỉ " +
+				"đọc dữ liệu. Hãy THỰC SỰ gọi công cụ ghi để làm việc đó, sau đó đọc lại để " +
+				"xác nhận, rồi mới báo hoàn thành. Nếu chưa làm được, hãy nói thật với người " +
+				"dùng là chưa thực hiện."
+			s.blockFinal(state, content, thinking, reason)
+			slog.Warn("fabrication_guard.blocked",
+				"session", state.Input.SessionKey,
+				"agent", store.AgentIDFromContext(state.Ctx),
+				"write_tools_used", len(state.Tool.WriteToolsUsed),
+				"content_preview", truncateForLog(content, 120))
+			return
+		}
+		content = unverifiedNotice + content
+		slog.Warn("fabrication_guard.surrendered_unverified",
 			"session", state.Input.SessionKey,
 			"agent", store.AgentIDFromContext(state.Ctx),
 			"write_tools_used", len(state.Tool.WriteToolsUsed),
-			"content_preview", truncateForLog(content, 120))
-		return
+			"content_preview", truncateForLog(content, 160))
 	}
 
 	// Fire post_model_response hook for final responses (no tool calls).
