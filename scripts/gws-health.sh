@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
+# gws auth health probe. Run from the VPS host.
+# Probes in the SAME user context as the daemon (root in-container), so a
+# FAIL here means agent runs will 401 too — no false negatives from probing
+# as a different uid.
 set -euo pipefail
 fail=0
 probe() {
   local name="$1" cred="$2" cfg="$3"
-  if ! docker exec -u goclaw goclaw-goclaw-1 test -f "$cred" 2>/dev/null; then
+  if ! docker exec goclaw-goclaw-1 test -f "$cred" 2>/dev/null; then
     echo "[gws-health] FAIL tenant=$name reason=missing_creds path=$cred"
     fail=1
     return
   fi
-  if docker exec -u goclaw \
+  if docker exec \
       -e GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$cred" \
       -e GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$cfg" \
       -e GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file \

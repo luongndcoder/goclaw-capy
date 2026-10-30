@@ -24,8 +24,8 @@ install -m 600 -o 1000 -g 1000 "$src" "$dest_dir/credentials.json"
 chown -R 1000:1000 "$VOL/gws/${tenant}"
 chmod 700 "$dest_dir" "$dest_dir/config"
 
-# also keep host mirror under /root/credentials for backup
-install -m 600 "$src" "/root/credentials/gws-${tenant}.json"
+# also keep host mirror under /opt/deploy/goclaw/credentials for backup
+install -m 600 "$src" "/opt/deploy/goclaw/credentials/gws-${tenant}.json"
 
 # clear stale /tmp caches
 docker exec goclaw-goclaw-1 sh -c "rm -rf /tmp/gws-${tenant} /tmp/gws-health-${tenant}" 2>/dev/null || true

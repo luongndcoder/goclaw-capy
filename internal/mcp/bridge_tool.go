@@ -449,7 +449,11 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 				"server", t.serverName, "tool", t.registeredName,
 				"user_id", store.UserIDFromContext(ctx),
 				"latency_ms", latencyMs)
-			return tools.ErrorResult(fmt.Sprintf("MCP tool %q: credential expired, please retry", t.registeredName))
+			return tools.ErrorResult(fmt.Sprintf(
+				"MCP tool %q: credential expired or revoked (401). Do NOT retry more than once — "+
+					"if the retry also fails, tell the user the %q connection needs re-authentication "+
+					"by the owner and stop.",
+				t.registeredName, t.serverName))
 		}
 		// Detect server-side session reset (FastMCP "invalid during session
 		// initialization", mcp-go ErrSessionTerminated, etc.). Trigger an

@@ -942,7 +942,45 @@ func credentialedGitCredentialResolutionError(binary, reason string) *Result {
 	}
 }
 
+// authFailureRe matches credential/authentication failure output from any
+// CLI (OAuth expiry, missing login, revoked tokens). Shapes, not servers:
+// gws "Access denied", gh "Bad credentials", aws "ExpiredToken", gcloud
+// "reauth", kubectl "Unauthorized". A match means retrying the identical
+// command cannot succeed — the credential itself must be repaired.
+var authFailureRe = regexp.MustCompile(`(?i)(?:\b401\b|unauthorized|invalid_grant|invalid_token|expired.?token|no credentials provided|credentials? (?:have |has )?expired|auth login|reauth|login required|authentication (?:failed|required|expired)|bad credentials|access.?denied.{0,80}credential|credential.{0,80}access.?denied)`)
+
+// isAuthFailure reports whether CLI output indicates dead/missing credentials.
+func isAuthFailure(output string) bool {
+	if output == "" {
+		return false
+	}
+	return authFailureRe.MatchString(output)
+}
+
+// credentialedAuthError converts a dead-credential failure into a
+// non-retryable error: the model must NOT run the same command again (it
+// burned 5 identical retries in production before this guard existed).
+// It must surface the problem to the user/owner instead.
+func credentialedAuthError(binary string, args []string, exitCode int, output string) *Result {
+	slog.Warn("secure_cli.credential_dead",
+		"binary", binary,
+		"args", strings.Join(args, " "),
+		"exit_code", exitCode)
+	return &Result{
+		ForLLM: fmt.Sprintf("[CREDENTIALED EXEC] Credentials for %q are missing or expired (exit code %d).\n"+
+			"DO NOT retry this command — identical retries cannot succeed and only burn time.\n"+
+			"Tell the user plainly that the %q login needs to be refreshed by the owner, "+
+			"then stop and wait for the user instead of trying workarounds.\n\n%s",
+			binary, exitCode, binary, output),
+		ForUser:   fmt.Sprintf("Đăng nhập %q đã hết hạn, chủ nhân cần đăng nhập lại.", binary),
+		IsError:   true,
+	}
+}
+
 func credentialedExecFailError(binary string, args []string, exitCode int, output string) *Result {
+	if isAuthFailure(output) {
+		return credentialedAuthError(binary, args, exitCode, output)
+	}
 	return &Result{
 		ForLLM: fmt.Sprintf("[CREDENTIALED EXEC] Command failed (exit code %d).\n"+
 			"Binary: %s\nArgs: %s\n"+
