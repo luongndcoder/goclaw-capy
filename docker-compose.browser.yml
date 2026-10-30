@@ -22,11 +22,16 @@ services:
       - --no-sandbox
       # New headless (Chrome 112+) is required for --load-extension to work.
       - --headless=new
-      - --remote-allow-origins=*
+      - "--remote-allow-origins=*"
       - --disable-gpu
       - --disable-dev-shm-usage
     ports:
-      - "${CHROME_CDP_PORT:-9222}:9222"
+      - "127.0.0.1:9222:9222"
+    networks:
+      goclaw-net:
+        ipv4_address: 192.168.16.50
+        aliases:
+          - localhost
     shm_size: 2gb
     healthcheck:
       # chromedp/headless-shell is minimal — no wget/curl/nc. Use bash's
@@ -44,7 +49,11 @@ services:
 
   goclaw:
     environment:
-      - GOCLAW_BROWSER_REMOTE_URL=ws://chrome:9222
+      - GOCLAW_BROWSER_REMOTE_URL=ws://192.168.16.50:9222
     depends_on:
       chrome:
         condition: service_healthy
+
+networks:
+  goclaw-net:
+    external: true

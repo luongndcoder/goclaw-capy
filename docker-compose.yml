@@ -37,7 +37,7 @@ services:
         COMMIT_SHA: "${GOCLAW_COMMIT_SHA:-}"
     # Uncomment to test update UI: GOCLAW_VERSION=v1.0.0
     ports:
-      - "${GOCLAW_PORT:-18790}:18790"
+      - "127.0.0.1:${GOCLAW_PORT:-18790}:18790"
     env_file:
       - path: .env
         required: false
@@ -68,7 +68,7 @@ services:
       - SETGID
       - CHOWN
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=256m
+      - /tmp:rw,exec,nosuid,size=2g
     deploy:
       resources:
         limits:

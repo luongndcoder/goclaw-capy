@@ -64,6 +64,10 @@ type ToolState struct {
 	AllowedTools   map[string]bool
 	LoopDetector   any // concrete type toolLoopState lives in agent; Phase 5 defines LoopDetector interface
 	TotalToolCalls int
+	// WriteToolsUsed records names of tools that MUTATE external state
+	// (sheets writes, formatting, files). Used to catch the model claiming
+	// "I updated/formatted X" in a run that performed NO write tool call.
+	WriteToolsUsed []string
 	AsyncToolCalls []string      // tool names that executed async (spawn)
 	MediaResults   []MediaResult // media files produced by tools
 	Deliverables   []string      // tool output content for team task results
@@ -93,6 +97,7 @@ type ObserveState struct {
 
 	// Post-model-response hook blocking.
 	BlockedByHook       bool   // true if post_model_response hook blocked delivery
+	FabricationBlocks    int    // count of fabrication-guard blocks (capped retries)
 	HookRejectionReason string // rejection reason from hook, injected as user message
 }
 
