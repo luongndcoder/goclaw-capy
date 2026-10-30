@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -40,6 +41,23 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 
 	// Strip raw technical leakage before anything user-facing is built.
 	msg.Content = channels.SanitizeOutbound(msg.Content)
+
+	// Inline remote images: a bare image URL alone on a line (QR codes,
+	// screenshots, charts) is downloaded and sent as a real image so the
+	// user sees it in-chat instead of tapping a link. Failures keep the URL
+	// text untouched as fallback.
+	rest, fetched := fetchInlineImages(ctx, msg.Content)
+	msg.Content = rest
+	for _, tmp := range fetched {
+		msg.Media = append(msg.Media, bus.MediaAttachment{URL: tmp})
+	}
+	// Fetched temp files are created inside Send (after dispatch's temp-media
+	// claiming ran), so release them here instead of leaking on disk.
+	defer func() {
+		for _, tmp := range fetched {
+			os.Remove(tmp)
+		}
+	}()
 
 	threadType := protocol.ThreadTypeUser
 	if c.IsGroupApproved(msg.ChatID) {
