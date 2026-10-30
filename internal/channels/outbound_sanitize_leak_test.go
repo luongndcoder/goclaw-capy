@@ -82,3 +82,42 @@ func TestSanitizeOutbound_MoneyTextUntouched(t *testing.T) {
 		}
 	}
 }
+
+// TestSanitizeOutbound_GenericServerDump proves the rules are structural, not
+// per-server: a dump from a hypothetical future MCP server with unknown keys
+// is stripped all the same.
+func TestSanitizeOutbound_GenericServerDump(t *testing.T) {
+	in := "Kết quả tra cứu:\n" +
+		"```json\n" +
+		"{\n" +
+		"  \"customer_ref\": \"ACME-8891\",\n" +
+		"  \"ledger_entries\": [\n" +
+		"    {\"id\": 1, \"amount\": 500},\n" +
+		"    {\"id\": 2, \"amount\": 700}\n" +
+		"  ],\n" +
+		"  \"cursor\": \"next-page-token-xyz\"\n" +
+		"}\n" +
+		"```\n" +
+		"Tóm lại còn 2 khoản."
+	got := SanitizeOutbound(in)
+	for _, leak := range []string{"customer_ref", "ledger_entries", "ACME-8891"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("unknown-server dump leaked: %q\nfull output:\n%s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "Tóm lại còn 2 khoản.") {
+		t.Errorf("lost natural text, got:\n%s", got)
+	}
+
+	// Same payload unfenced must go too.
+	plain := "Đây nhé:\n{\n  \"customer_ref\": \"ACME-8891\",\n  \"ledger_entries\": [],\n  \"cursor\": \"tok\"\n}\nHết."
+	if got := SanitizeOutbound(plain); strings.Contains(got, "ACME-8891") {
+		t.Errorf("unfenced unknown-server dump leaked:\n%s", got)
+	}
+
+	// Small illustrative snippets stay.
+	small := "Ví dụ payload: {\"id\": 1} là như vậy."
+	if got := SanitizeOutbound(small); !strings.Contains(got, "{\"id\": 1}") {
+		t.Errorf("small snippet wrongly stripped:\n%s", got)
+	}
+}
