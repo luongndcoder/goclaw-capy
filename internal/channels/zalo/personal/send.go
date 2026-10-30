@@ -97,11 +97,13 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			if name == "" {
 				name = ref.senderID
 			}
-			prefix := "@" + name + " "
-			msg.Content = prefix + msg.Content
+			// Mention span covers "@Name" only — the trailing space stays
+			// outside the highlight so the reply text doesn't stick to it.
+			tag := "@" + name
+			msg.Content = tag + " " + msg.Content
 			mentions = append(mentions, protocol.Mention{
 				Pos: 0,
-				Len: utf16Len(prefix),
+				Len: utf16Len(tag),
 				UID: ref.senderID,
 			})
 		}
