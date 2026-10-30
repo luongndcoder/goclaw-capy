@@ -12,6 +12,9 @@ interface UiState {
   sidebarCollapsed: boolean;
   mobileSidebarOpen: boolean;
   pageSize: number; // global pagination page size preference
+  // Sidebar nav groups the user collapsed. Keys: core, conversations,
+  // connectivity, capabilities, data, monitoring, system.
+  collapsedGroups: Record<string, boolean>;
 
   setTheme: (theme: Theme) => void;
   setLanguage: (language: Language) => void;
@@ -20,7 +23,18 @@ interface UiState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   setMobileSidebarOpen: (open: boolean) => void;
   setPageSize: (size: number) => void;
+  toggleSidebarGroup: (group: string) => void;
 }
+
+// Groups hidden by default to keep the sidebar focused on daily work
+// (chat/agents). The user can expand them; the choice persists.
+const DEFAULT_COLLAPSED_GROUPS: Record<string, boolean> = {
+  connectivity: true,
+  capabilities: true,
+  data: true,
+  monitoring: true,
+  system: true,
+};
 
 export const useUiStore = create<UiState>()(
   persist(
@@ -31,6 +45,7 @@ export const useUiStore = create<UiState>()(
       sidebarCollapsed: false,
       mobileSidebarOpen: false,
       pageSize: 20,
+      collapsedGroups: { ...DEFAULT_COLLAPSED_GROUPS },
 
       setTheme: (theme) => {
         set({ theme });
@@ -56,6 +71,15 @@ export const useUiStore = create<UiState>()(
       setMobileSidebarOpen: (open) => set({ mobileSidebarOpen: open }),
 
       setPageSize: (size) => set({ pageSize: size }),
+
+      toggleSidebarGroup: (group) => {
+        const collapsedGroups = {
+          ...DEFAULT_COLLAPSED_GROUPS,
+          ...get().collapsedGroups,
+        };
+        collapsedGroups[group] = !collapsedGroups[group];
+        set({ collapsedGroups });
+      },
     }),
     {
       name: "goclaw:ui", // localStorage key
@@ -66,6 +90,7 @@ export const useUiStore = create<UiState>()(
         timezone: state.timezone,
         sidebarCollapsed: state.sidebarCollapsed,
         pageSize: state.pageSize,
+        collapsedGroups: state.collapsedGroups,
       }),
     }
   )

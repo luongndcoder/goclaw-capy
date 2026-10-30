@@ -41,6 +41,7 @@ import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { usePendingPairingsCount } from "@/hooks/use-pending-pairings-count";
 import { useAuthStore } from "@/stores/use-auth-store";
+import { useUiStore } from "@/stores/use-ui-store";
 import { useTenants } from "@/hooks/use-tenants";
 import { getRuntimeBranding } from "@/lib/branding";
 
@@ -56,6 +57,14 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
   const { isOwner } = useTenants();
   const isAdmin = role === "admin" || role === "owner";
   const branding = getRuntimeBranding();
+  const collapsedGroups = useUiStore((s) => s.collapsedGroups);
+  const toggleSidebarGroup = useUiStore((s) => s.toggleSidebarGroup);
+  const isOpen = (group: string) => !collapsedGroups[group];
+  const groupProps = (group: string) => ({
+    groupKey: group,
+    open: isOpen(group),
+    onToggle: toggleSidebarGroup,
+  });
 
   return (
     <aside
@@ -87,20 +96,20 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
 
       {/* Nav items */}
       <nav className="flex-1 space-y-4 overflow-y-auto overscroll-contain px-2 py-4">
-        <SidebarGroup label={t("groups.core")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.core")} collapsed={collapsed} {...groupProps("core")}>
           <SidebarItem to={ROUTES.OVERVIEW} icon={LayoutDashboard} label={t("nav.overview")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.CHAT} icon={MessageSquare} label={t("nav.chat")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.AGENTS} icon={Bot} label={t("nav.agents")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.TEAMS} icon={Users} label={t("nav.agentTeams")} collapsed={collapsed} />
         </SidebarGroup>
 
-        <SidebarGroup label={t("groups.conversations")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.conversations")} collapsed={collapsed} {...groupProps("conversations")}>
           <SidebarItem to={ROUTES.SESSIONS} icon={History} label={t("nav.sessions")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.PENDING_MESSAGES} icon={Inbox} label={t("nav.pendingMessages")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.CONTACTS} icon={Contact} label={t("nav.contacts")} collapsed={collapsed} />
         </SidebarGroup>
 
-        <SidebarGroup label={t("groups.connectivity")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.connectivity")} collapsed={collapsed} {...groupProps("connectivity")}>
           <SidebarItem to={ROUTES.CHANNELS} icon={Radio} label={t("nav.channels")} collapsed={collapsed} />
           {isAdmin && (
             <SidebarItem to={ROUTES.WEBHOOKS} icon={Cable} label={t("nav.webhooks")} collapsed={collapsed} />
@@ -111,7 +120,7 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
           )}
         </SidebarGroup>
 
-        <SidebarGroup label={t("groups.capabilities")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.capabilities")} collapsed={collapsed} {...groupProps("capabilities")}>
           <SidebarItem to={ROUTES.SKILLS} icon={Zap} label={t("nav.skills")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.BUILTIN_TOOLS} icon={Package} label={t("nav.builtinTools")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.MCP} icon={Plug} label={t("nav.mcpServers")} collapsed={collapsed} />
@@ -122,14 +131,14 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
           <SidebarItem to={ROUTES.HOOKS} icon={Webhook} label={t("nav.hooks")} collapsed={collapsed} />
         </SidebarGroup>
 
-        <SidebarGroup label={t("groups.data")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.data")} collapsed={collapsed} {...groupProps("data")}>
           <SidebarItem to={ROUTES.MEMORY} icon={Brain} label={t("nav.memory")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.VAULT} icon={FileArchive} label={t("nav.vault")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.KNOWLEDGE_GRAPH} icon={Network} label={t("nav.knowledgeGraph")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.STORAGE} icon={HardDrive} label={t("nav.storage")} collapsed={collapsed} />
         </SidebarGroup>
 
-        <SidebarGroup label={t("groups.monitoring")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.monitoring")} collapsed={collapsed} {...groupProps("monitoring")}>
           <SidebarItem to={ROUTES.TRACES} icon={Activity} label={t("nav.traces")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.EVENTS} icon={Radar} label={t("nav.realtimeEvents")} collapsed={collapsed} />
           <SidebarItem to={ROUTES.ACTIVITY} icon={ClipboardList} label={t("nav.activity")} collapsed={collapsed} />
@@ -137,7 +146,7 @@ export function Sidebar({ collapsed, onNavItemClick }: SidebarProps) {
         </SidebarGroup>
 
         {isAdmin && (
-        <SidebarGroup label={t("groups.system")} collapsed={collapsed}>
+        <SidebarGroup label={t("groups.system")} collapsed={collapsed} {...groupProps("system")}>
           {isOwner && (
             <SidebarItem to={ROUTES.TENANTS} icon={Building2} label={t("nav.tenants")} collapsed={collapsed} />
           )}
