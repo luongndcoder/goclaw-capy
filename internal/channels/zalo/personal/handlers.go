@@ -58,6 +58,7 @@ func (c *Channel) handleDM(msg protocol.UserMessage) {
 		content = fmt.Sprintf("[From: %s]\n%s", senderName, content)
 	}
 	c.rememberReplyContext(threadID, displayNameOrID(senderName, senderID), msg.Data, cacheBodyForContent(msg.Data.Content))
+	c.rememberInboundRef(threadID, senderID, displayNameOrID(senderName, senderID), msg.Data, body)
 
 	slog.Debug("zalo_personal DM received",
 		"sender", senderID,
@@ -113,6 +114,7 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 		content = content + "\n" + tag
 	}
 	c.rememberReplyContext(threadID, senderName, msg.Data.TMessage, cacheBodyForContent(msg.Data.Content))
+	c.rememberInboundRef(threadID, senderID, senderName, msg.Data.TMessage, body)
 
 	// Step 2: @mention gating — record non-mentioned messages in history and return.
 	if c.RequireMention() {

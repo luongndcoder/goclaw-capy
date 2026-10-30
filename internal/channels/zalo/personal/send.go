@@ -84,9 +84,30 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		}
 	}
 
-	// Send text content (if any remains after media).
+	// Send text content (if any remains after media). The first chunk quotes
+	// the triggering inbound message when known (threaded context); groups
+	// additionally @-mention the asker.
+	var quote *protocol.QuoteRef
+	var mentions []protocol.Mention
+	if ref, ok := c.loadInboundRef(msg.ChatID); ok {
+		q := ref.quote
+		quote = &q
+		if threadType == protocol.ThreadTypeGroup && ref.senderID != "" {
+			name := ref.senderName
+			if name == "" {
+				name = ref.senderID
+			}
+			prefix := "@" + name + " "
+			msg.Content = prefix + msg.Content
+			mentions = append(mentions, protocol.Mention{
+				Pos: 0,
+				Len: utf16Len(prefix),
+				UID: ref.senderID,
+			})
+		}
+	}
 	if msg.Content != "" {
-		return c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content)
+		return c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content, quote, mentions)
 	}
 	return nil
 }
@@ -117,7 +138,7 @@ func (c *Channel) sendFile(ctx context.Context, sess *protocol.Session, chatID s
 	return err
 }
 
-func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, text string) error {
+func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, text string, quote *protocol.QuoteRef, mentions []protocol.Mention) error {
 	chunks := channels.ChunkMarkdown(text, maxTextLength)
 	for i, chunk := range chunks {
 		// Pacing: rapid-fire bubbles feel robotic and risk tripping Zalo's
@@ -129,11 +150,45 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 			case <-time.After(zaloChunkPacing):
 			}
 		}
-		if err := c.sendChunkWithRetry(ctx, sess, chatID, threadType, chunk); err != nil {
-			return err
+		// Only the first chunk carries the quote/mention; the rest are plain
+		// continuations. A failed quote-send falls back to plain delivery so
+		// the reply is never lost to a malformed quote payload.
+		var err error
+		if i == 0 && quote != nil {
+			err = c.sendChunkWithRetryQuote(ctx, sess, chatID, threadType, chunk, quote, mentions)
+			if err != nil {
+				slog.Warn("zalo_personal: quote send failed, falling back to plain",
+					"chat_id", chatID, "error", err)
+			}
+		}
+		if err != nil || i > 0 || quote == nil {
+			if qerr := c.sendChunkWithRetry(ctx, sess, chatID, threadType, chunk); qerr != nil {
+				return qerr
+			}
+			continue
 		}
 	}
 	return nil
+}
+
+// sendChunkWithRetryQuote delivers one chunk via the quote endpoint.
+func (c *Channel) sendChunkWithRetryQuote(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, chunk string, quote *protocol.QuoteRef, mentions []protocol.Mention) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(zaloChunkRetryDelay):
+			}
+		}
+		if _, err = protocol.SendMessageWithQuote(ctx, sess, chatID, threadType, chunk, quote, mentions); err == nil {
+			return nil
+		}
+		slog.Warn("zalo_personal: quote chunk send failed, retrying",
+			"chat_id", chatID, "attempt", attempt+1, "error", err)
+	}
+	return err
 }
 
 // sendChunkWithRetry delivers one text chunk with a single retry: the

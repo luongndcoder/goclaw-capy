@@ -24,6 +24,7 @@ type Channel struct {
 	config      config.ZaloPersonalConfig
 	typingCtrls sync.Map // threadID → *typing.Controller
 	replyCache  *replycontext.Cache
+	inboundRefs sync.Map // chatID → inboundRef (last inbound message, for quote-reply)
 
 	mu       sync.RWMutex // protects sess and listener
 	sess     *protocol.Session
