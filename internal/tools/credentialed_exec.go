@@ -869,7 +869,16 @@ func (t *ExecTool) lookupCredentialedBinary(ctx context.Context, command string)
 		return nil, "", nil
 	}
 	if cred == nil {
-		slog.Debug("secure_cli.lookup: no credential found", "binary", binary, "agent_id", agentID)
+		// Visibility for the silent killer: a credentialed-context call that
+		// falls through to PLAIN exec runs without any credentials (gws 401
+		// "No credentials provided"). Warn with identity fields so the next
+		// occurrence names the missing leg (tenant/agent/user) directly.
+		slog.Warn("secure_cli.lookup_miss_fallthrough_plain_exec",
+			"binary", binary,
+			"agent_id", agentID,
+			"user_id", userID,
+			"tenant_id", store.TenantIDFromContext(ctx),
+			"channel", store.ChannelContextScopeChainFromContext(ctx))
 		return nil, "", nil
 	}
 	slog.Debug("secure_cli.lookup: found credential", "binary", binary, "cred_id", cred.ID, "env_size", len(cred.EncryptedEnv))
