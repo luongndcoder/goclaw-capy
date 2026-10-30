@@ -84,3 +84,18 @@ func TestStripMarkdown_LonePipeLineUntouched(t *testing.T) {
 		t.Errorf("lone pipe line modified: %q", got)
 	}
 }
+
+func TestStripMarkdown_HTMLStripped(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Chào <b>anh Lương</b> nhé", "Chào anh Lương nhé"},
+		{"Xem <a href=\"https://x.vn/qr\">mã QR</a> giúp em", "Xem mã QR (https://x.vn/qr) giúp em"},
+		{"Kết quả:<br/>xong", "Kết quả:xong"},
+		{"5 < 10 và a > b", "5 < 10 và a > b"},
+		{"Dùng <pre>code</pre> nhé", "Dùng code nhé"},
+	}
+	for _, c := range cases {
+		if got := StripMarkdown(c.in); got != c.want {
+			t.Errorf("StripMarkdown(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

@@ -16,6 +16,12 @@ func StripMarkdown(text string) string {
 	// monospace, so aligned-pipe tables arrive as walls of text on phones.
 	text = renderTablesAsLines(text)
 
+	// 0b. HTML tags (the model sometimes emits Telegram-style markup shared
+	// across channels): links keep "text (url)", all other tags drop leaving
+	// inner text. Plain comparisons like "5 < 10" are untouched.
+	text = reHTMLLink.ReplaceAllString(text, "$2 ($1)")
+	text = reHTMLTag.ReplaceAllString(text, "")
+
 	// 1. Strip fenced code blocks — keep content, remove ``` delimiters
 	text = reFencedCode.ReplaceAllString(text, "$1")
 
@@ -73,6 +79,12 @@ var (
 	reBullet          = regexp.MustCompile(`(?m)^(\s*)[-*+]\s+`)
 
 	reExcessiveNewlines = regexp.MustCompile(`\n{3,}`)
+
+	// HTML from cross-channel markup: <a href="u">t</a> → "t (u)".
+	reHTMLLink = regexp.MustCompile(`(?i)<a\s+[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
+	// Any other tag <b>, <pre>, <br/> … → dropped, inner text kept.
+	// Requires a letter right after < so "a < b" comparisons survive.
+	reHTMLTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
 )
 
 // tableSeparatorRe matches a markdown table delimiter row: |---|---|.
