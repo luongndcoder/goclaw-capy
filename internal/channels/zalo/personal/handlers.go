@@ -178,11 +178,12 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 }
 
 // startTyping starts a typing indicator with keepalive for the given thread.
-// Zalo typing expires after ~5s, so keepalive fires every 3s.
+// Zalo typing expires after ~5s, so keepalive fires every 3s. MaxDuration
+// covers long agent runs (MCP calls + LLM turns); delivery stops it early.
 func (c *Channel) startTyping(threadID string, threadType protocol.ThreadType) {
 	sess := c.session()
 	ctrl := typing.New(typing.Options{
-		MaxDuration:       60 * time.Second,
+		MaxDuration:       5 * time.Minute,
 		KeepaliveInterval: 4 * time.Second,
 		StartFn: func() error {
 			return protocol.SendTypingEvent(context.Background(), sess, threadID, threadType)

@@ -12,6 +12,10 @@ func StripMarkdown(text string) string {
 		return text
 	}
 
+	// 0. Tables → readable lines first (while pipes are intact): Zalo has no
+	// monospace, so aligned-pipe tables arrive as walls of text on phones.
+	text = renderTablesAsLines(text)
+
 	// 1. Strip fenced code blocks — keep content, remove ``` delimiters
 	text = reFencedCode.ReplaceAllString(text, "$1")
 
@@ -70,3 +74,81 @@ var (
 
 	reExcessiveNewlines = regexp.MustCompile(`\n{3,}`)
 )
+
+// tableSeparatorRe matches a markdown table delimiter row: |---|---|.
+var tableSeparatorRe = regexp.MustCompile(`^\s*\|?[\s:|\-]+\|\s*$`)
+
+// splitTableRow splits a "| a | b |" line into trimmed cells.
+func splitTableRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.Trim(line, "|")
+	parts := strings.Split(line, "|")
+	cells := make([]string, 0, len(parts))
+	for _, p := range parts {
+		cells = append(cells, strings.TrimSpace(p))
+	}
+	return cells
+}
+
+// renderTablesAsLines converts markdown table blocks into one bullet line per
+// data row ("• H1: v1, H2: v2"). Only blocks with a header + delimiter row
+// convert; lone pipe lines pass through untouched.
+func renderTablesAsLines(text string) string {
+	lines := strings.Split(text, "\n")
+	var out []string
+	i := 0
+	for i < len(lines) {
+		// A bare delimiter row outside a converted table is never prose.
+		if tableSeparatorRe.MatchString(lines[i]) && strings.Contains(lines[i], "-") {
+			i++
+			continue
+		}
+		if i+1 < len(lines) && isTableHeaderLine(lines[i]) && tableSeparatorRe.MatchString(lines[i+1]) &&
+			strings.Contains(lines[i+1], "-") {
+			header := splitTableRow(lines[i])
+			j := i + 2
+			converted := 0
+			for j < len(lines) && isTableRowLine(lines[j]) {
+				row := splitTableRow(lines[j])
+				pairs := make([]string, 0, len(header))
+				for k := range header {
+					if header[k] == "" {
+						continue
+					}
+					v := ""
+					if k < len(row) {
+						v = row[k]
+					}
+					pairs = append(pairs, header[k]+": "+v)
+				}
+				if len(pairs) > 0 {
+					out = append(out, "• "+strings.Join(pairs, ", "))
+					converted++
+				}
+				j++
+			}
+			if converted > 0 {
+				i = j
+				continue
+			}
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return strings.Join(out, "\n")
+}
+
+// isTableHeaderLine reports a plausible table header row: pipe-delimited with
+// at least 2 cells.
+func isTableHeaderLine(line string) bool {
+	t := strings.TrimSpace(line)
+	if !strings.Contains(t, "|") {
+		return false
+	}
+	return len(splitTableRow(line)) >= 2
+}
+
+// isTableRowLine reports a plausible table data row: starts with a pipe.
+func isTableRowLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "|")
+}

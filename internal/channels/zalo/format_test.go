@@ -1,6 +1,9 @@
 package zalo
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestStripMarkdown(t *testing.T) {
 	tests := []struct {
@@ -59,5 +62,25 @@ func TestStripMarkdown(t *testing.T) {
 				t.Errorf("StripMarkdown(%q)\n got: %q\nwant: %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStripMarkdown_TablesBecomeLines(t *testing.T) {
+	in := "Báo cáo nợ:\n\n| Thành viên | Số tiền |\n|---|---|\n| Chị Linh | 1040000 |\n| Anh Tuấn | 500000 |\n\nHết."
+	got := StripMarkdown(in)
+	for _, keep := range []string{"Báo cáo nợ:", "Thành viên: Chị Linh, Số tiền: 1040000", "Thành viên: Anh Tuấn, Số tiền: 500000", "Hết."} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("missing %q in:\n%s", keep, got)
+		}
+	}
+	if strings.Contains(got, "|") {
+		t.Errorf("pipe characters leaked:\n%s", got)
+	}
+}
+
+func TestStripMarkdown_LonePipeLineUntouched(t *testing.T) {
+	in := "Ghi chú | mang theo tiền mặt"
+	if got := StripMarkdown(in); got != in {
+		t.Errorf("lone pipe line modified: %q", got)
 	}
 }

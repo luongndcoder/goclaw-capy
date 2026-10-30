@@ -3,6 +3,8 @@ package personal
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
@@ -12,6 +14,14 @@ import (
 )
 
 const maxTextLength = 2000
+
+const (
+	// zaloChunkPacing spaces multi-bubble answers so they read (and deliver)
+	// in order instead of arriving as an instant burst.
+	zaloChunkPacing = 400 * time.Millisecond
+	// zaloChunkRetryDelay waits before the single retry of a failed chunk.
+	zaloChunkRetryDelay = time.Second
+)
 
 // Send delivers an outbound message to a Zalo chat.
 func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
@@ -90,10 +100,42 @@ func (c *Channel) sendFile(ctx context.Context, sess *protocol.Session, chatID s
 }
 
 func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, text string) error {
-	for _, chunk := range channels.ChunkMarkdown(text, maxTextLength) {
-		if _, err := protocol.SendMessage(ctx, sess, chatID, threadType, chunk); err != nil {
+	chunks := channels.ChunkMarkdown(text, maxTextLength)
+	for i, chunk := range chunks {
+		// Pacing: rapid-fire bubbles feel robotic and risk tripping Zalo's
+		// unofficial-API rate limits. First chunk goes immediately.
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(zaloChunkPacing):
+			}
+		}
+		if err := c.sendChunkWithRetry(ctx, sess, chatID, threadType, chunk); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sendChunkWithRetry delivers one text chunk with a single retry: the
+// unofficial Zalo API flakes transiently, and losing a middle chunk garbles
+// the whole answer.
+func (c *Channel) sendChunkWithRetry(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, chunk string) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(zaloChunkRetryDelay):
+			}
+		}
+		if _, err = protocol.SendMessage(ctx, sess, chatID, threadType, chunk); err == nil {
+			return nil
+		}
+		slog.Warn("zalo_personal: chunk send failed, retrying",
+			"chat_id", chatID, "attempt", attempt+1, "error", err)
+	}
+	return err
 }
