@@ -6,26 +6,27 @@ import (
 	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
-	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-// UseSkillTool is a marker tool for observability.
-// It generates tool.call / tool.result events in spans and realtime
-// so skill activation is visible in tracing. For agents that have read_file,
-// the actual skill content is still loaded via read_file — this tool stays a
-// no-op for them. Agents without read_file in their resolved tool set (see
-// store.AvailableToolNamesFromContext) have no way to follow up, so this tool
-// inlines the skill content directly instead.
+// UseSkillTool activates a skill and returns its instructions INLINE in a
+// single call (one turn), following the harness pattern where skill
+// invocation is a real tool rather than a marker: the model calls use_skill,
+// gets the content, and follows it — no mandatory read_file follow-up turn.
+// Oversized skills are truncated with a pointer to read_file as fallback.
 type UseSkillTool struct {
 	loader *skills.Loader
 }
+
+// maxInlineSkillChars bounds inlined skill content. Larger skills truncate
+// with a read_file fallback note instead of burning context.
+const maxInlineSkillChars = 12000
 
 func NewUseSkillTool(loader *skills.Loader) *UseSkillTool { return &UseSkillTool{loader: loader} }
 
 func (t *UseSkillTool) Name() string { return "use_skill" }
 
 func (t *UseSkillTool) Description() string {
-	return "Activate a skill. Call this before read_file to signal skill usage for tracing and observability."
+	return "Activate a skill and get its instructions inline. Call with the skill name, then follow the returned instructions directly."
 }
 
 func (t *UseSkillTool) Parameters() map[string]any {
@@ -50,19 +51,19 @@ func (t *UseSkillTool) Execute(ctx context.Context, args map[string]any) *Result
 	if name == "" {
 		return ErrorResult("name parameter is required")
 	}
+	if t.loader == nil {
+		return ErrorResult(fmt.Sprintf("skill %q unavailable: no skill loader configured", name))
+	}
 
 	slog.Info("skill.activated", "skill", name)
 
-	// nil AvailableToolNames means "no restriction known" (see
-	// store.AvailableToolNamesFromContext) — only inline when we can positively
-	// confirm read_file is missing from this agent's resolved tool set.
-	if available := store.AvailableToolNamesFromContext(ctx); available != nil && !available["read_file"] {
-		content, ok := t.loader.LoadSkill(ctx, name)
-		if !ok {
-			return ErrorResult(fmt.Sprintf("skill %q not found", name))
-		}
-		return NewResult(content)
+	content, ok := t.loader.LoadSkill(ctx, name)
+	if !ok {
+		return ErrorResult(fmt.Sprintf("skill %q not found", name))
 	}
-
-	return NewResult(fmt.Sprintf("Skill %q activated. Proceed to read the skill's SKILL.md with read_file.", name))
+	if n := len([]rune(content)); n > maxInlineSkillChars {
+		content = string([]rune(content)[:maxInlineSkillChars]) +
+			fmt.Sprintf("\n\n…[skill content truncated (%d chars total). Read the full SKILL.md with read_file for the remainder, then follow it.]", n)
+	}
+	return NewResult(fmt.Sprintf("<skill name=%q>\n%s\n</skill>\nFollow these instructions to complete the task.", name, content))
 }

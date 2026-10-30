@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
@@ -28,8 +29,8 @@ func newTestSkillLoader(t *testing.T, name, body string) *skills.Loader {
 }
 
 // TestUseSkillTool_NoReadFile_InlinesContent covers issue #1477: an agent
-// whose resolved tool set does not include read_file has no way to follow up
-// on the "activated" message, so Execute must inline the skill body directly.
+// whose resolved tool set does not include read_file gets the body inline
+// (same as everyone now — single-turn invocation).
 func TestUseSkillTool_NoReadFile_InlinesContent(t *testing.T) {
 	loader := newTestSkillLoader(t, "ck-plan", "SKILL BODY CONTENT")
 	tool := NewUseSkillTool(loader)
@@ -44,49 +45,52 @@ func TestUseSkillTool_NoReadFile_InlinesContent(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error result: %s", res.ForLLM)
 	}
-	if res.ForLLM != "SKILL BODY CONTENT" {
-		t.Fatalf("ForLLM = %q, want inlined skill body", res.ForLLM)
+	if !strings.Contains(res.ForLLM, "SKILL BODY CONTENT") {
+		t.Fatalf("ForLLM must inline skill body, got %q", res.ForLLM)
 	}
 }
 
-// TestUseSkillTool_HasReadFile_BehaviorUnchanged is a regression check: an
-// agent whose resolved tool set DOES include read_file must see the exact
-// same "activated" message as before this change — byte for byte.
-func TestUseSkillTool_HasReadFile_BehaviorUnchanged(t *testing.T) {
-	loader := newTestSkillLoader(t, "ck-plan", "SKILL BODY CONTENT")
-	tool := NewUseSkillTool(loader)
+// TestUseSkillTool_AlwaysInlinesContent: skill invocation is a real tool —
+// one call returns the instructions inline regardless of read_file access,
+// so the model follows them without a follow-up turn.
+func TestUseSkillTool_AlwaysInlinesContent(t *testing.T) {
+	for _, ctx := range []context.Context{
+		context.Background(), // nil allowlist
+		store.WithAvailableToolNames(context.Background(), map[string]bool{"read_file": true, "write_file": true}),
+		store.WithAvailableToolNames(context.Background(), map[string]bool{"web_search": true}), // no read_file
+	} {
+		loader := newTestSkillLoader(t, "ck-plan", "SKILL BODY CONTENT")
+		tool := NewUseSkillTool(loader)
 
-	allowed := map[string]bool{"read_file": true, "write_file": true}
-	ctx := store.WithAvailableToolNames(context.Background(), allowed)
-
-	res := tool.Execute(ctx, map[string]any{"name": "ck-plan"})
-	if res == nil {
-		t.Fatal("Execute returned nil result")
-	}
-	want := `Skill "ck-plan" activated. Proceed to read the skill's SKILL.md with read_file.`
-	if res.ForLLM != want {
-		t.Fatalf("ForLLM = %q, want %q", res.ForLLM, want)
+		res := tool.Execute(ctx, map[string]any{"name": "ck-plan"})
+		if res == nil {
+			t.Fatal("Execute returned nil result")
+		}
+		if res.IsError {
+			t.Fatalf("unexpected error result: %s", res.ForLLM)
+		}
+		if !strings.Contains(res.ForLLM, "SKILL BODY CONTENT") {
+			t.Fatalf("ForLLM must inline skill body, got %q", res.ForLLM)
+		}
 	}
 }
 
-// TestUseSkillTool_NoAllowlistInContext_BehaviorUnchanged is the direction-2
-// nil case: when the context carries no tool allowlist at all (e.g. a call
-// path outside the pipeline's per-iteration tool dispatch, or an agent with
-// no tool policy configured — see store.AvailableToolNamesFromContext), the
-// tool must NOT assume read_file is missing. It must keep the original
-// two-step behavior, since nil here means "no restriction known", not
-// "nothing is available".
-func TestUseSkillTool_NoAllowlistInContext_BehaviorUnchanged(t *testing.T) {
-	loader := newTestSkillLoader(t, "ck-plan", "SKILL BODY CONTENT")
+// TestUseSkillTool_TruncatesOversizedContent: huge skills truncate with a
+// read_file fallback pointer instead of burning context.
+func TestUseSkillTool_TruncatesOversizedContent(t *testing.T) {
+	big := strings.Repeat("x", maxInlineSkillChars+100)
+	loader := newTestSkillLoader(t, "big-skill", big)
 	tool := NewUseSkillTool(loader)
 
-	res := tool.Execute(context.Background(), map[string]any{"name": "ck-plan"})
-	if res == nil {
-		t.Fatal("Execute returned nil result")
+	res := tool.Execute(context.Background(), map[string]any{"name": "big-skill"})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %#v", res)
 	}
-	want := `Skill "ck-plan" activated. Proceed to read the skill's SKILL.md with read_file.`
-	if res.ForLLM != want {
-		t.Fatalf("ForLLM = %q, want %q (nil allowlist must not be treated as \"no tools available\")", res.ForLLM, want)
+	if !strings.Contains(res.ForLLM, "read_file") {
+		t.Errorf("truncated skill must point at read_file fallback, got %.120q...", res.ForLLM)
+	}
+	if len([]rune(res.ForLLM)) > maxInlineSkillChars+2000 {
+		t.Errorf("inlined content not bounded, len=%d", len([]rune(res.ForLLM)))
 	}
 }
 

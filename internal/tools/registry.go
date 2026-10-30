@@ -14,6 +14,11 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/safego"
 )
 
+// maxToolOutputChars bounds any single tool's model-facing output.
+// Matches the exec cap: one shared ceiling keeps context math predictable
+// across tool kinds (MCP dumps, file reads, command output alike).
+const maxToolOutputChars = 30000
+
 // Registry manages tool registration and execution.
 type Registry struct {
 	tools       map[string]Tool
@@ -235,6 +240,18 @@ func (r *Registry) ExecuteWithContext(ctx context.Context, name string, args map
 		if result.ForUser != "" {
 			result.ForUser = ScrubCredentials(result.ForUser)
 		}
+	}
+
+	// Post-execute output validation: bound every tool's model-facing output
+	// so one giant dump cannot blow the run context. Truncation is marked so
+	// the model narrows its next call instead of assuming full data.
+	if len(result.ForLLM) > maxToolOutputChars {
+		slog.Debug("tool output truncated",
+			"tool", name,
+			"output_chars", len(result.ForLLM),
+			"max_chars", maxToolOutputChars,
+		)
+		result.ForLLM = capExecOutput(result.ForLLM, maxToolOutputChars)
 	}
 
 	slog.Debug("tool executed",
