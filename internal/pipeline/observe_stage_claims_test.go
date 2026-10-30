@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -55,5 +56,53 @@ func TestObserveStage_FabricationGuard_BlocksWithoutWrite(t *testing.T) {
 	}
 	if st.Observe.FinalContent != "" {
 		t.Fatalf("blocked content must not become final, got %q", st.Observe.FinalContent)
+	}
+}
+
+// TestObserveStage_AsyncGuard_BlocksClaimWithOutstanding verifies fix 5: a
+// completion claim while async spawns are unretrieved is blocked with a
+// spawn-get instruction instead of reaching the user.
+func TestObserveStage_AsyncGuard_BlocksClaimWithOutstanding(t *testing.T) {
+	t.Parallel()
+	stage := NewObserveStage(&PipelineDeps{})
+	st := defaultState()
+	st.Ctx = context.Background()
+	st.Tool.AsyncOutstanding = 2
+	st.Think.LastResponse = &providers.ChatResponse{Content: "Hoàn thành rồi anh nhé"}
+	if err := stage.Execute(t.Context(), st); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !st.Observe.ContinueAfterFinal {
+		t.Fatal("async guard must block unverified completion claim")
+	}
+	if st.Observe.FinalContent != "" {
+		t.Fatalf("blocked content must not become final, got %q", st.Observe.FinalContent)
+	}
+	pending := st.Messages.Pending()
+	if len(pending) != 2 {
+		t.Fatalf("expected assistant + retry instruction, got %d messages", len(pending))
+	}
+	if !strings.Contains(pending[1].Content, "spawn(action=\"get\"") {
+		t.Errorf("retry must point at spawn get:\n%s", pending[1].Content)
+	}
+}
+
+// TestObserveStage_AsyncGuard_PassesHonestProgress ensures progress reports
+// without a completion claim still reach the user while work is outstanding.
+func TestObserveStage_AsyncGuard_PassesHonestProgress(t *testing.T) {
+	t.Parallel()
+	stage := NewObserveStage(&PipelineDeps{})
+	st := defaultState()
+	st.Ctx = context.Background()
+	st.Tool.AsyncOutstanding = 1
+	st.Think.LastResponse = &providers.ChatResponse{Content: "Em đã giao việc cho subagent, có kết quả em báo anh ngay"}
+	if err := stage.Execute(t.Context(), st); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if st.Observe.ContinueAfterFinal {
+		t.Fatal("honest progress report must not be blocked")
+	}
+	if st.Observe.FinalContent == "" {
+		t.Fatal("honest progress report must become final content")
 	}
 }

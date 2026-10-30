@@ -258,6 +258,7 @@ func (l *Loop) makeCheckReadOnly(req *RunRequest, bridgeRS *runState) func(state
 func syncBridgeToState(bridgeRS *runState, state *pipeline.RunState, action toolResultAction) {
 	state.Tool.LoopKilled = bridgeRS.loopKilled
 	state.Tool.AsyncToolCalls = bridgeRS.asyncToolCalls
+	state.Tool.AsyncOutstanding = bridgeRS.asyncOutstanding
 	state.Tool.Deliverables = bridgeRS.deliverables
 	state.Evolution.BootstrapWrite = bridgeRS.bootstrapWriteDetected
 	state.Evolution.TeamTaskSpawns = bridgeRS.teamTaskSpawns

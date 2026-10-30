@@ -50,6 +50,19 @@ func (l *Loop) processToolResult(
 	if result.Async {
 		rs.asyncToolCalls = append(rs.asyncToolCalls, tc.Name)
 	}
+	// Track unretrieved async spawns for the premature-completion gate.
+	// A sync spawn (mode="sync") blocks until done, so only async spawns
+	// create an outstanding obligation. A successful spawn(action="get")
+	// retrieves one durable result and clears one obligation.
+	if registryName == "spawn" {
+		if result.Async {
+			rs.asyncOutstanding++
+		} else if action, _ := tc.Arguments["action"].(string); action == "get" && !result.IsError {
+			if rs.asyncOutstanding > 0 {
+				rs.asyncOutstanding--
+			}
+		}
+	}
 
 	if result.IsError {
 		errMsg := result.ForLLM

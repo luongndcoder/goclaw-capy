@@ -68,6 +68,10 @@ type ToolState struct {
 	// (sheets writes, formatting, files). Used to catch the model claiming
 	// "I updated/formatted X" in a run that performed NO write tool call.
 	WriteToolsUsed []string
+	// AsyncOutstanding counts async spawns whose durable result has not been
+	// retrieved via spawn(action="get") yet (synced from the agent runState).
+	// The ObserveStage async gate blocks completion claims while this is >0.
+	AsyncOutstanding int
 	AsyncToolCalls []string      // tool names that executed async (spawn)
 	MediaResults   []MediaResult // media files produced by tools
 	Deliverables   []string      // tool output content for team task results

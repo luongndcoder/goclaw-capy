@@ -733,6 +733,10 @@ type runState struct {
 	finalContent   string
 	finalThinking  string
 	asyncToolCalls []string // async spawn tool names for fallback
+	// asyncOutstanding counts async spawns whose durable result has not been
+	// retrieved via spawn(action="get") yet. Used by the ObserveStage async
+	// gate: a completion claim while this is >0 is premature.
+	asyncOutstanding int
 	mediaResults   []MediaResult
 	deliverables   []string // tool output content for team task results
 	pendingMsgs    []providers.Message

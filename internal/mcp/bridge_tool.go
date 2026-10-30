@@ -494,6 +494,21 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 	if msg, ok := detectLogicalErrorPayload(text); ok {
 		return tools.ErrorResult(msg)
 	}
+	// A mutating tool reporting accepted/queued/pending has NOT done the work.
+	// Fail loudly with a verify instruction so the model cannot report "done"
+	// from this payload. Read tools keep the payload — a pending *state* is
+	// legitimate information for reads (e.g. pairing or job status checks).
+	if status, ok := detectIncompletePayload(text); ok && isMutatingBridgeTool(t.registeredName) {
+		slog.Warn("mcp.tool.call.incomplete_status",
+			"server", t.serverName, "tool", t.registeredName,
+			"user_id", store.UserIDFromContext(ctx),
+			"status", status)
+		return tools.ErrorResult(fmt.Sprintf(
+			"MCP tool %q returned status %q — the work is NOT complete, nothing is confirmed. "+
+				"Do NOT tell the user it is done. Re-read the target with the matching read tool "+
+				"(or poll the operation status) and confirm the effect before reporting completion.",
+			t.registeredName, status))
+	}
 
 	// Wrap MCP tool results as external/untrusted content to prevent prompt injection.
 	// MCP servers may be third-party and return adversarial content.
@@ -618,7 +633,92 @@ func detectLogicalErrorPayload(text string) (string, bool) {
 			return s, true
 		}
 	}
+	// Some servers report failure as {"ok":false,...} or {"success":false,...}
+	// with the reason in message/error fields.
+	for _, flag := range []string{"ok", "success"} {
+		if v, ok := m[flag]; ok {
+			if b, isBool := v.(bool); isBool && !b {
+				for _, k := range []string{"message", "error", "reason", "detail"} {
+					if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+						return s, true
+					}
+				}
+				return "tool reported " + flag + "=false", true
+			}
+		}
+	}
 	return "", false
+}
+
+// incompleteStatuses are JSON status/state values meaning "accepted but not
+// finished". A mutating tool returning one of these has NOT completed the
+// work — surfacing it as success lets the model tell the user "done" while
+// nothing landed (the premature-completion complaint).
+var incompleteStatuses = map[string]bool{
+	"accepted": true, "queued": true, "pending": true,
+	"in_progress": true, "inprogress": true, "running": true,
+	"processing": true, "scheduled": true, "working": true,
+	"started": true, "deferred": true,
+}
+
+// detectIncompletePayload reports whether a JSON text payload carries an
+// incomplete status/state. Read tools pass through untouched — only the
+// caller decides (via isMutatingBridgeTool) whether to escalate.
+func detectIncompletePayload(text string) (string, bool) {
+	raw := strings.TrimSpace(text)
+	if raw == "" || !strings.HasPrefix(raw, "{") {
+		return "", false
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return "", false
+	}
+	for _, k := range []string{"status", "state", "result", "outcome"} {
+		if v, ok := m[k].(string); ok {
+			if incompleteStatuses[strings.ToLower(strings.TrimSpace(v))] {
+				return strings.TrimSpace(v), true
+			}
+		}
+	}
+	return "", false
+}
+
+// isMutatingBridgeTool mirrors pipeline.isWriteTool for MCP bridge names:
+// exact known mutators plus a verb heuristic on the base tool name, with
+// read-only prefixes excluded. Kept local to avoid an import cycle
+// (pipeline already depends on mcp-adjacent types via tools).
+func isMutatingBridgeTool(registeredName string) bool {
+	base := registeredName
+	if idx := strings.LastIndex(registeredName, "__"); idx >= 0 {
+		base = registeredName[idx+2:]
+	}
+	lower := strings.ToLower(base)
+	for _, p := range []string{
+		"get_", "list_", "read_", "search_", "query_", "describe_",
+	} {
+		if strings.HasPrefix(lower, p) {
+			return false
+		}
+	}
+	for _, s := range []string{"status", "thumbnail", "select"} {
+		if strings.Contains(lower, s) {
+			return false
+		}
+	}
+	mutating := []string{
+		"create", "update", "delete", "insert", "append", "write",
+		"edit", "set_", "add_", "remove", "merge", "protect",
+		"format", "upload", "clear", "rename", "resize", "freeze",
+		"filter", "hyperlink", "validation", "border",
+		"conditional", "save", "sync", "export", "import",
+		"publish", "send", "post", "push",
+	}
+	for _, sub := range mutating {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAllCapsPlaceholder detects LLM-generated all-caps placeholder strings

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strconv"
 	"strings"
 	"context"
 	"log/slog"
@@ -62,6 +63,38 @@ func (s *ObserveStage) drainInjectedMessages() []providers.Message {
 
 func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.ChatResponse, injected []providers.Message) {
 	content, thinking := splitTaggedThinkingContent(resp.Content, resp.Thinking)
+
+	// ── Async gate ─────────────────────────────────────────────────
+	// The run spawned background work (spawn async) whose durable result has
+	// not been retrieved via spawn(action="get") yet, but the model claims
+	// completion. The subagent result is not in context (no injected
+	// announcement arrived), so the claim cannot be grounded — block it and
+	// point at the retrieval tool. Honest progress reports ("đã giao việc,
+	// có kết quả sẽ báo") carry no completion claim and pass through.
+	if len(injected) == 0 && state.Observe.FabricationBlocks < 3 &&
+		claimsWriteCompletion(content) && state.Tool.AsyncOutstanding > 0 {
+		state.Observe.FabricationBlocks++
+		state.Messages.AppendPending(providers.Message{
+			Role:     "assistant",
+			Content:  content,
+			Thinking: thinking,
+		})
+		reason := "CHƯA XONG: bạn đã giao việc cho subagent chạy nền nhưng chưa lấy kết quả " +
+			"(còn " + strconv.Itoa(state.Tool.AsyncOutstanding) + " việc chưa thu hồi). " +
+			"Hãy gọi spawn(action=\"get\", completion_id=\"...\") để lấy kết quả thật, " +
+			"đối chiếu rồi mới báo hoàn thành. Nếu việc nền chưa xong, hãy nói thật với " +
+			"người dùng là đang chờ thay vì báo đã xong."
+		state.Messages.AppendPending(providers.Message{Role: "user", Content: reason})
+		state.Observe.BlockedByHook = true
+		state.Observe.HookRejectionReason = reason
+		state.Observe.ContinueAfterFinal = true
+		slog.Warn("async_guard.blocked",
+			"session", state.Input.SessionKey,
+			"agent", store.AgentIDFromContext(state.Ctx),
+			"outstanding", state.Tool.AsyncOutstanding,
+			"content_preview", truncateForLog(content, 120))
+		return
+	}
 
 	// ── Fabrication guard ────────────────────────────────────────────
 	// The model sometimes CLAIMS it wrote/formatted data while the run
