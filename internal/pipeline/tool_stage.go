@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,81 @@ type ToolStage struct {
 // NewToolStage creates a ToolStage.
 func NewToolStage(deps *PipelineDeps) *ToolStage {
 	return &ToolStage{deps: deps, result: Continue}
+}
+
+
+// isWriteTool reports whether a tool mutates external state (sheet writes,
+// formatting, file writes, cron, messages). Used by the fabrication guard in
+// ObserveStage: a final response that CLAIMS such work must have at least one
+// of these tools actually executed in the run.
+func isWriteTool(name string) bool {
+	writeTools := map[string]bool{
+		// Google Sheets (MCP bridge names include the mcp_<server>__ prefix)
+		"mcp_sheets__update_cells":              true,
+		"mcp_sheets__batch_update_cells":        true,
+		"mcp_sheets__batch_update":              true,
+		"mcp_sheets__format_sheet_range":        true,
+		"mcp_sheets__set_number_format":         true,
+		"mcp_sheets__conditional_format":        true,
+		"mcp_sheets__data_validation_dropdown":  true,
+		"mcp_sheets__set_range_borders":         true,
+		"mcp_sheets__resize_sheet_dimensions":   true,
+		"mcp_sheets__auto_resize_columns":       true,
+		"mcp_sheets__freeze_panes":              true,
+		"mcp_sheets__merge_cells":               true,
+		"mcp_sheets__rename_sheet_tab":          true,
+		"mcp_sheets__delete_sheet_tab":          true,
+		"mcp_sheets__insert_remove_rows":        true,
+		"mcp_sheets__append_rows":               true,
+		"mcp_sheets__clear_range":               true,
+		"mcp_sheets__find_replace":              true,
+		"mcp_sheets__add_filter":                true,
+		"mcp_sheets__protect_sheet":             true,
+		"mcp_sheets__upload_image_to_sheet":     true,
+		"mcp_sheets__set_hyperlink":             true,
+		"mcp_sheets__add_note":                  true,
+		// builtin mutators
+		"write_file": true, "edit": true, "exec": true, "bash": true,
+		"cron": true, "send_file": true, "message": true,
+		"create_image": true, "create_audio": true, "create_video": true,
+	}
+	if writeTools[name] {
+		return true
+	}
+	// Fallback heuristic for MCP tools from other servers (docs, notebooklm,
+	// leox...): their mutating tools never appear in the exact map above.
+	// Strip the mcp_<server>__ prefix and match mutating verbs, excluding
+	// known read-only prefixes so get_/list_/search_ stays read-only.
+	if !strings.HasPrefix(name, "mcp_") {
+		return false
+	}
+	base := name
+	if idx := strings.LastIndex(name, "__"); idx >= 0 {
+		base = name[idx+2:]
+	}
+	lower := strings.ToLower(base)
+	for _, p := range []string{
+		"get_", "list_", "read_", "search_", "query_", "describe",
+		"status", "thumbnail", "select",
+	} {
+		if strings.HasPrefix(lower, p) || strings.Contains(lower, p) && (p == "status" || p == "thumbnail" || p == "select") {
+			return false
+		}
+	}
+	mutating := []string{
+		"create", "update", "delete", "insert", "append", "write",
+		"edit", "set_", "add_", "remove", "merge", "protect",
+		"format", "upload", "clear", "rename", "resize", "freeze",
+		"filter", "hyperlink", "validation", "border",
+		"conditional", "save", "sync", "export", "import",
+		"publish", "send", "post", "push",
+	}
+	for _, sub := range mutating {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ToolStage) Name() string        { return "tool" }
@@ -100,6 +176,9 @@ func (s *ToolStage) Execute(ctx context.Context, state *RunState) error {
 		}
 		appendToolBatchMessages(state, msgs, &deferredNonTool)
 		state.Tool.TotalToolCalls++
+		if isWriteTool(tc.Name) && toolCallSucceeded(msgs) {
+			state.Tool.WriteToolsUsed = append(state.Tool.WriteToolsUsed, tc.Name)
+		}
 
 		// Hook: async PostToolUse — fire and forget with detached context.
 		// Parent the hook span to the tool span so it nests under the tool call.
@@ -338,6 +417,9 @@ func (s *ToolStage) executeParallel(ctx context.Context, state *RunState, prefli
 		processed := s.deps.ProcessToolResult(ctx, state, tc, r.msg, r.rawData)
 		appendToolBatchMessages(state, processed, &deferredNonTool)
 		state.Tool.TotalToolCalls++
+		if isWriteTool(tc.Name) && toolCallSucceeded(processed) {
+			state.Tool.WriteToolsUsed = append(state.Tool.WriteToolsUsed, tc.Name)
+		}
 
 		// Hook: async PostToolUse for parallel path — fire and forget.
 		// PreToolUse already ran in preflight before any raw I/O was scheduled.
@@ -373,6 +455,19 @@ func (s *ToolStage) executeParallel(ctx context.Context, state *RunState, prefli
 	appendDeferredMessages(state, deferredNonTool)
 	s.checkExitConditions(state)
 	return nil
+}
+
+// toolCallSucceeded reports whether a tool execution batch contains a
+// successful tool result. A batch with no tool-role message (should not
+// happen outside tests) is treated as failure so a failed write is never
+// recorded as evidence for the fabrication guard in ObserveStage.
+func toolCallSucceeded(msgs []providers.Message) bool {
+	for _, msg := range msgs {
+		if msg.Role == "tool" {
+			return !msg.IsError
+		}
+	}
+	return false
 }
 
 // appendToolBatchMessages appends tool-role messages immediately and defers

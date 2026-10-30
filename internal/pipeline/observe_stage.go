@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strings"
 	"context"
 	"log/slog"
 
@@ -61,6 +62,37 @@ func (s *ObserveStage) drainInjectedMessages() []providers.Message {
 
 func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.ChatResponse, injected []providers.Message) {
 	content, thinking := splitTaggedThinkingContent(resp.Content, resp.Thinking)
+
+	// ── Fabrication guard ────────────────────────────────────────────
+	// The model sometimes CLAIMS it wrote/formatted data while the run
+	// executed no write tool at all (verified incident: only get_sheet_data
+	// was called, yet the reply said "đã áp dụng định dạng,
+	// đã đặt QR..."). Block such a reply and retry truthfully.
+	if len(injected) == 0 && state.Observe.FabricationBlocks < 3 &&
+		claimsWriteCompletion(content) && len(state.Tool.WriteToolsUsed) == 0 {
+		state.Observe.FabricationBlocks++
+		state.Messages.AppendPending(providers.Message{
+			Role:     "assistant",
+			Content:  content,
+			Thinking: thinking,
+		})
+		reason := "PHÁT HIỆN BỊA ĐẶT: bạn vừa nói đã cập nhật/định dạng/thêm/sửa dữ liệu, " +
+			"NHƯNG trong lượt này bạn KHÔNG hề gọi bất kỳ công cụ ghi nào (update_cells, " +
+			"set_number_format, format_sheet_range, append_rows, write_file...). Bạn chỉ " +
+			"đọc dữ liệu. Hãy THỰC SỰ gọi công cụ ghi để làm việc đó, sau đó đọc lại để " +
+			"xác nhận, rồi mới báo hoàn thành. Nếu chưa làm được, hãy nói thật với người " +
+			"dùng là chưa thực hiện."
+		state.Messages.AppendPending(providers.Message{Role: "user", Content: reason})
+		state.Observe.BlockedByHook = true
+		state.Observe.HookRejectionReason = reason
+		state.Observe.ContinueAfterFinal = true
+		slog.Warn("fabrication_guard.blocked",
+			"session", state.Input.SessionKey,
+			"agent", store.AgentIDFromContext(state.Ctx),
+			"write_tools_used", len(state.Tool.WriteToolsUsed),
+			"content_preview", truncateForLog(content, 120))
+		return
+	}
 
 	// Fire post_model_response hook for final responses (no tool calls).
 	// This is a blocking hook that can prevent user delivery and inject a retry.
@@ -140,4 +172,49 @@ func appendPendingMessages(state *RunState, messages []providers.Message) {
 	for _, msg := range messages {
 		state.Messages.AppendPending(msg)
 	}
+}
+
+// claimsWriteCompletion reports whether the assistant text asserts that it
+// WROTE/MODIFIED data (as opposed to merely reading or answering). Used by the
+// fabrication guard in ObserveStage.
+func claimsWriteCompletion(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	claims := []string{
+		"đã áp dụng", "đã đặt", "đã chuyển công thức", "đã cập nhật",
+		"đã chỉnh", "đã định dạng", "đã format", "đã thêm",
+		"đã xoá", "đã xóa", "đã ghi", "đã sửa", "đã tạo",
+		"đã đổi", "đã set", "đã thiết lập", "đã nới rộng",
+		"đã cài đặt", "đã hoàn thiện", "đã thực hiện",
+		"đã bổ sung", "đã điền", "đã gán", "đã chèn",
+		// Write-specific additions: commonly seen in sheets/file tasks
+		// that previously bypassed the guard and reached users as "done".
+		"đã xử lý", "đã lưu", "đã nhập", "đã đồng bộ", "đã xuất",
+		"đã xong", "đã hoàn thành", "đã hoàn tất", "đã làm xong",
+		"xong rồi", "hoàn thành", "hoàn tất",
+		// English claims
+		"i have updated", "i updated", "i have formatted", "i formatted",
+		"i have set", "i set the", "i have added", "i added", "i have saved",
+		"i saved", "i have created", "i created", "done - updated",
+		"has been updated", "has been saved", "has been created",
+		"successfully updated", "successfully saved", "written to",
+		"exported", "synced",
+	}
+	for _, c := range claims {
+		if strings.Contains(lower, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// truncateForLog bounds a string for structured log output.
+func truncateForLog(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
