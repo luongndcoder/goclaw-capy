@@ -36,8 +36,8 @@ func TestQuoteRef_Fallbacks(t *testing.T) {
 		t.Errorf("default type must be 1, got %d", q.quoteMsgType())
 	}
 	q2 := &QuoteRef{GlobalMsgID: "g-9", MsgID: "m-local", CliMsgType: 32, MsgType: "webchat"}
-	if q2.quoteMsgID() != "g-9" {
-		t.Errorf("server id must win: %q", q2.quoteMsgID())
+	if q2.quoteMsgID() != "m-local" {
+		t.Errorf("msgId must win (reference client quotes by msgId): %q", q2.quoteMsgID())
 	}
 	if q2.quoteMsgType() != 32 {
 		t.Errorf("explicit CliMsgType must win: %d", q2.quoteMsgType())

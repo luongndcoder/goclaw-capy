@@ -14,14 +14,17 @@ import (
 // qmsgTs/qmsg/qmsgTTL, qmsgAttach group-only.
 type QuoteRef struct {
 	OwnerID     string // uidFrom of the inbound message
-	GlobalMsgID string // server message id (falls back to MsgID)
-	MsgID       string // local message id fallback
+	GlobalMsgID string // server-wide id (fallback when MsgID empty)
+	MsgID       string // message id — the qmsgId wire value
 	CliMsgID    string // client message id
 	CliMsgType  int    // client message type (0 = derive from MsgType)
 	MsgType     string // inbound msgType string (webchat, chat.photo, ...)
 	TS          string // inbound ts
 	Msg         string // inbound text (for text quotes)
 	AttachRaw   string // original quote.attach JSON, passed through when present
+	// PropertyExt is the inbound propertyExt JSON (text style metadata).
+	// Group text quotes carry it as qmsgAttach, mirroring the reference client.
+	PropertyExt string
 	TTL         int
 }
 
@@ -60,12 +63,13 @@ func clientMessageType(msgType string) int {
 	}
 }
 
-// quoteMsgID prefers the server id, falling back to the local id.
+// quoteMsgID is the qmsgId wire value: the message id, with the server-wide
+// id as fallback — matching the reference client's quote.msgId.
 func (q *QuoteRef) quoteMsgID() string {
-	if q.GlobalMsgID != "" {
-		return q.GlobalMsgID
+	if q.MsgID != "" {
+		return q.MsgID
 	}
-	return q.MsgID
+	return q.GlobalMsgID
 }
 
 // quoteMsgType returns the explicit client type or derives it.
@@ -112,32 +116,25 @@ func SendMessageWithQuote(ctx context.Context, sess *Session, threadID string, t
 		"qmsg":      quote.Msg,
 		"qmsgTTL":   quote.TTL,
 	}
-	// Group-only attachment passthrough for non-text quotes.
-	if threadType == ThreadTypeGroup && quote.AttachRaw != "" {
-		payload["qmsgAttach"] = quote.AttachRaw
+	// Group-only attachment: original attach passthrough first, else the
+	// inbound propertyExt for text quotes (mirrors the reference client,
+	// which always sends qmsgAttach on group quotes when available).
+	if threadType == ThreadTypeGroup {
+		if quote.AttachRaw != "" {
+			payload["qmsgAttach"] = quote.AttachRaw
+		} else if quote.PropertyExt != "" {
+			payload["qmsgAttach"] = quote.PropertyExt
+		}
 	}
 	if threadType == ThreadTypeGroup {
 		payload["grid"] = threadID
 		payload["visibility"] = 0
 		if len(mentions) > 0 {
-			mi := make([]map[string]any, 0, len(mentions))
-			for _, m := range mentions {
-				typ := 0
-				if m.UID == "-1" {
-					typ = 1 // @all
-				}
-				mi = append(mi, map[string]any{
-					"pos":  m.Pos,
-					"uid":  m.UID,
-					"len":  m.Len,
-					"type": typ,
-				})
-			}
-			raw, err := json.Marshal(mi)
+			mentionInfo, err := encodeMentionInfo(mentions)
 			if err != nil {
-				return "", fmt.Errorf("zalo_personal: encode mentionInfo: %w", err)
+				return "", err
 			}
-			payload["mentionInfo"] = string(raw)
+			payload["mentionInfo"] = mentionInfo
 		}
 	} else {
 		payload["toid"] = threadID
@@ -184,6 +181,102 @@ func SendMessageWithQuote(ctx context.Context, sess *Session, threadID string, t
 	}
 	if err := json.Unmarshal(plain, &result); err != nil {
 		return "", fmt.Errorf("zalo_personal: parse quote result: %w", err)
+	}
+
+	return result.MsgID.String(), nil
+}
+
+// encodeMentionInfo renders the wire mentionInfo JSON for group mentions.
+func encodeMentionInfo(mentions []Mention) (string, error) {
+	mi := make([]map[string]any, 0, len(mentions))
+	for _, m := range mentions {
+		typ := 0
+		if m.UID == "-1" {
+			typ = 1 // @all
+		}
+		mi = append(mi, map[string]any{
+			"pos":  m.Pos,
+			"uid":  m.UID,
+			"len":  m.Len,
+			"type": typ,
+		})
+	}
+	raw, err := json.Marshal(mi)
+	if err != nil {
+		return "", fmt.Errorf("zalo_personal: encode mentionInfo: %w", err)
+	}
+	return string(raw), nil
+}
+
+// SendMessageWithMention sends a group text with @-mentions via the /mention
+// endpoint. Used as the fallback when a quoted+mentioned send fails, so the
+// mention survives even if quoting does not.
+func SendMessageWithMention(ctx context.Context, sess *Session, threadID string, text string, mentions []Mention) (string, error) {
+	if text == "" {
+		return "", fmt.Errorf("zalo_personal: message text cannot be empty")
+	}
+	if len(mentions) == 0 {
+		return "", fmt.Errorf("zalo_personal: mentions required")
+	}
+
+	baseURL := getServiceURL(sess, "group")
+	if baseURL == "" {
+		return "", fmt.Errorf("zalo_personal: no service URL for group")
+	}
+
+	mentionInfo, err := encodeMentionInfo(mentions)
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"message":     text,
+		"clientId":    time.Now().UnixMilli(),
+		"ttl":         0,
+		"grid":        threadID,
+		"visibility":  0,
+		"mentionInfo": mentionInfo,
+	}
+
+	encData, err := encryptPayload(sess, payload)
+	if err != nil {
+		return "", fmt.Errorf("zalo_personal: encrypt mention payload: %w", err)
+	}
+
+	sendURL := makeURL(sess, baseURL+"/api/group/mention", map[string]any{"nretry": 0}, true)
+	form := buildFormBody(map[string]string{"params": encData})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, form)
+	if err != nil {
+		return "", err
+	}
+	setDefaultHeaders(req, sess)
+
+	resp, err := sess.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("zalo_personal: send mention: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var envelope Response[*string]
+	if err := readJSON(resp, &envelope); err != nil {
+		return "", fmt.Errorf("zalo_personal: parse mention response: %w", err)
+	}
+	if envelope.ErrorCode != 0 {
+		return "", fmt.Errorf("zalo_personal: mention error code %d", envelope.ErrorCode)
+	}
+	if envelope.Data == nil {
+		return "", nil
+	}
+
+	plain, err := decryptDataField(sess, *envelope.Data)
+	if err != nil {
+		return "", fmt.Errorf("zalo_personal: decrypt mention result: %w", err)
+	}
+
+	var result struct {
+		MsgID json.Number `json:"msgId"`
+	}
+	if err := json.Unmarshal(plain, &result); err != nil {
+		return "", fmt.Errorf("zalo_personal: parse mention result: %w", err)
 	}
 
 	return result.MsgID.String(), nil

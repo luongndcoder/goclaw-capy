@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // Message is the interface for incoming Zalo messages (DM or group).
 type Message interface {
@@ -25,6 +28,9 @@ type TMessage struct {
 	CMD         int     `json:"cmd"`
 	ST          int     `json:"st"`
 	AT          int     `json:"at"`
+	// PropertyExt carries style/property metadata (color, size, type...).
+	// Needed to build qmsgAttach on group quote-replies.
+	PropertyExt json.RawMessage `json:"propertyExt,omitempty"`
 }
 
 // TGroupMessage extends TMessage with group-specific fields.
@@ -49,6 +55,7 @@ func (m *TMessage) UnmarshalJSON(data []byte) error {
 		CMD         int             `json:"cmd"`
 		ST          int             `json:"st"`
 		AT          int             `json:"at"`
+		PropertyExt json.RawMessage `json:"propertyExt,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -67,6 +74,7 @@ func (m *TMessage) UnmarshalJSON(data []byte) error {
 	m.CMD = raw.CMD
 	m.ST = raw.ST
 	m.AT = raw.AT
+	m.PropertyExt = bytes.TrimSpace(raw.PropertyExt)
 	return nil
 }
 

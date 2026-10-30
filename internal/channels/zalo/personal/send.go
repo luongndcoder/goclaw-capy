@@ -151,14 +151,22 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 			}
 		}
 		// Only the first chunk carries the quote/mention; the rest are plain
-		// continuations. A failed quote-send falls back to plain delivery so
-		// the reply is never lost to a malformed quote payload.
+		// continuations. Delivery degrades gracefully: quote → mention-only
+		// (group) → plain, so the reply is never lost to a malformed
+		// quote/mention payload.
 		var err error
 		if i == 0 && quote != nil {
 			err = c.sendChunkWithRetryQuote(ctx, sess, chatID, threadType, chunk, quote, mentions)
 			if err != nil {
-				slog.Warn("zalo_personal: quote send failed, falling back to plain",
+				slog.Warn("zalo_personal: quote send failed, degrading",
 					"chat_id", chatID, "error", err)
+				if threadType == protocol.ThreadTypeGroup && len(mentions) > 0 {
+					err = c.sendChunkWithRetryMention(ctx, sess, chatID, chunk, mentions)
+					if err != nil {
+						slog.Warn("zalo_personal: mention send failed, falling back to plain",
+							"chat_id", chatID, "error", err)
+					}
+				}
 			}
 		}
 		if err != nil || i > 0 || quote == nil {
@@ -186,6 +194,27 @@ func (c *Channel) sendChunkWithRetryQuote(ctx context.Context, sess *protocol.Se
 			return nil
 		}
 		slog.Warn("zalo_personal: quote chunk send failed, retrying",
+			"chat_id", chatID, "attempt", attempt+1, "error", err)
+	}
+	return err
+}
+
+// sendChunkWithRetryMention delivers one group chunk via the /mention
+// endpoint (mention without quote).
+func (c *Channel) sendChunkWithRetryMention(ctx context.Context, sess *protocol.Session, chatID, chunk string, mentions []protocol.Mention) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(zaloChunkRetryDelay):
+			}
+		}
+		if _, err = protocol.SendMessageWithMention(ctx, sess, chatID, chunk, mentions); err == nil {
+			return nil
+		}
+		slog.Warn("zalo_personal: mention chunk send failed, retrying",
 			"chat_id", chatID, "attempt", attempt+1, "error", err)
 	}
 	return err

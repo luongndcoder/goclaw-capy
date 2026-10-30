@@ -33,6 +33,7 @@ func (c *Channel) rememberInboundRef(threadID, senderID, senderName string, msg 
 			TS:          msg.TS,
 			Msg:         body,
 			AttachRaw:   attach,
+			PropertyExt: string(msg.PropertyExt),
 		},
 	})
 }
