@@ -148,3 +148,44 @@ func TestObserveStage_AsyncGuard_PassesHonestProgress(t *testing.T) {
 		t.Fatal("honest progress report must become final content")
 	}
 }
+
+// TestObserveStage_GuardsAppendToneGuidance verifies that both async and fabrication
+// guards append conversational tone guidance to the retry message so the model doesn't
+// output harsh system-error style explanations to the user.
+func TestObserveStage_GuardsAppendToneGuidance(t *testing.T) {
+	t.Parallel()
+
+	// 1. Async guard check
+	stageAsync := NewObserveStage(&PipelineDeps{})
+	stAsync := defaultState()
+	stAsync.Ctx = context.Background()
+	stAsync.Tool.AsyncOutstanding = 1
+	stAsync.Think.LastResponse = &providers.ChatResponse{Content: "Xong rồi anh nhé"}
+	if err := stageAsync.Execute(t.Context(), stAsync); err != nil {
+		t.Fatalf("async Execute: %v", err)
+	}
+	pendingAsync := stAsync.Messages.Pending()
+	if len(pendingAsync) != 2 {
+		t.Fatalf("expected 2 pending messages, got %d", len(pendingAsync))
+	}
+	if !strings.Contains(pendingAsync[1].Content, "phong cách ấm áp, tự nhiên") {
+		t.Errorf("async guard retry message missing tone guidance:\n%s", pendingAsync[1].Content)
+	}
+
+	// 2. Fabrication guard check
+	stageFab := NewObserveStage(&PipelineDeps{})
+	stFab := defaultState()
+	stFab.Ctx = context.Background()
+	stFab.Tool.TotalToolCalls = 1
+	stFab.Think.LastResponse = &providers.ChatResponse{Content: "Đã hoàn thành việc nhập liệu"}
+	if err := stageFab.Execute(t.Context(), stFab); err != nil {
+		t.Fatalf("fabrication Execute: %v", err)
+	}
+	pendingFab := stFab.Messages.Pending()
+	if len(pendingFab) != 2 {
+		t.Fatalf("expected 2 pending messages, got %d", len(pendingFab))
+	}
+	if !strings.Contains(pendingFab[1].Content, "phong cách ấm áp, tự nhiên") {
+		t.Errorf("fabrication guard retry message missing tone guidance:\n%s", pendingFab[1].Content)
+	}
+}

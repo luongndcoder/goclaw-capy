@@ -744,6 +744,7 @@ func buildSkillsSection(skillsSummary string, hasSkillSearch, hasSkillManage boo
 			"After complex tasks (5+ tool calls), create skills for repeatable multi-step processes.",
 			"Skip for one-time tasks, debugging, or simple tasks. Ask user before creating.",
 			"Use: `skill_manage(action=\"create|patch|delete\", ...)`. Only manage your own skills.",
+			"Never mention skills, `skill_manage`, or \"saving as a skill\" to the user when a task fails or wasn't asked about; skill management is strictly silent/internal unless proposing a proven repeatable workflow.",
 			"",
 		)
 	}

@@ -64,6 +64,10 @@ const maxGuardBlocks = 3
 // verified") instead of a fabricated "done".
 const unverifiedNotice = "⚠️ Chưa xác minh: hệ thống chưa thấy bằng chứng đã làm xong việc dưới đây.\n\n"
 
+// guardToneGuidance coaches the model to maintain conversational tact during retry turns
+// so the user receives a warm, helpful response instead of an abrupt error report.
+const guardToneGuidance = " Lưu ý quan trọng khi trả lời lại người dùng: hãy giữ nguyên phong cách ấm áp, tự nhiên và cách xưng hô khéo léo trong SOUL.md; diễn đạt nhẹ nhàng, chu đáo (như đang kiểm tra hoặc cập nhật giúp họ), tuyệt đối KHÔNG dùng giọng văn cứng nhắc kiểu thông báo lỗi hệ thống."
+
 // blockFinal records a blocked final response and injects the retry
 // instruction so the model gets another turn to ground its claim.
 func (s *ObserveStage) blockFinal(state *RunState, content, thinking, reason string) {
@@ -105,7 +109,8 @@ func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.Cha
 				"(còn " + strconv.Itoa(state.Tool.AsyncOutstanding) + " việc chưa thu hồi). " +
 				"Hãy gọi spawn(action=\"get\", completion_id=\"...\") để lấy kết quả thật, " +
 				"đối chiếu rồi mới báo hoàn thành. Nếu việc nền chưa xong, hãy nói thật với " +
-				"người dùng là đang chờ thay vì báo đã xong."
+				"người dùng là đang chờ thay vì báo đã xong." +
+				guardToneGuidance
 			s.blockFinal(state, content, thinking, reason)
 			slog.Warn("async_guard.blocked",
 				"session", state.Input.SessionKey,
@@ -141,7 +146,8 @@ func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.Cha
 				"set_number_format, format_sheet_range, append_rows, write_file...). Bạn chỉ " +
 				"đọc dữ liệu. Hãy THỰC SỰ gọi công cụ ghi để làm việc đó, sau đó đọc lại để " +
 				"xác nhận, rồi mới báo hoàn thành. Nếu chưa làm được, hãy nói thật với người " +
-				"dùng là chưa thực hiện."
+				"dùng là chưa thực hiện." +
+				guardToneGuidance
 			s.blockFinal(state, content, thinking, reason)
 			slog.Warn("fabrication_guard.blocked",
 				"session", state.Input.SessionKey,

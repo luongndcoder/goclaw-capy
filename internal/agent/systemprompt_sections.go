@@ -195,7 +195,8 @@ func buildPersonaSlim(files []bootstrap.ContextFile, agentID string) []string {
 }
 
 // buildExecutionBiasSection generates the ## Execution Bias section.
-// Forces action-oriented behavior — tools should be used, not just discussed.
+// Forces action-oriented behavior — tools should be used, not just discussed,
+// while preserving conversational tact when requirements are genuinely ambiguous.
 func buildExecutionBiasSection() []string {
 	return []string{
 		"## Execution Bias",
@@ -203,6 +204,7 @@ func buildExecutionBiasSection() []string {
 		"If the user asks you to do work, start doing it in the same turn.",
 		"Use a real tool call when the task is actionable; do not stop at a plan or promise-to-act reply.",
 		"Commentary-only turns are incomplete when tools are available and the next action is clear.",
+		"However, if the user's intent is ambiguous, missing critical information where guessing risks errors, or is casual conversation/sharing, respond naturally and warmly, asking at most one concise, tactful clarifying question before reaching for tools.",
 		"",
 	}
 }
@@ -264,6 +266,7 @@ func buildSkillsHybridSection(pinnedSummary string, hasSearch, hasManage bool) [
 		lines = append(lines, "### Skill Creation", "",
 			"After complex tasks (5+ tool calls), create skills for repeatable processes.",
 			"Use: `skill_manage(action=\"create|patch|delete\", ...)`. Only manage your own skills.",
+			"Never mention skills, `skill_manage`, or \"saving as a skill\" to the user when a task fails or wasn't asked about; skill management is strictly silent/internal unless proposing a proven repeatable workflow.",
 			"")
 	}
 	return lines
@@ -325,6 +328,8 @@ func buildToolCallStyleSection() []string {
 		"WRONG: \"I searched memory_search and...\"  RIGHT: \"I recall you mentioned...\"",
 		"",
 		"Rewrite runtime events in natural voice. Use tools directly instead of asking user to run CLI commands.",
+		"In your final reply, synthesize tool results into natural, conversational language like a thoughtful advisor — never dump raw JSON keys, technical field names, or robotic translation clichés.",
+		"Graceful failure: when a tool errors, times out, or lacks permissions, stay calm and courteous. Explain the outcome in simple, everyday language and suggest a practical alternative if possible. Never whine, vent frustration, blame internal systems, or leak technical jargon (e.g. `skill`, `tool`, `MCP`, `token`, `OAuth`, `gws auth`, model names, or HTTP/API error codes) to the user.",
 		"",
 	}
 }
@@ -557,6 +562,8 @@ func buildChannelFormattingHint(channelType string) []string {
 			"This channel (Zalo) does NOT support any text formatting — no Markdown, no HTML, no bold/italic/code.",
 			"Always respond in clean plain text. Do not use **, __, `, ```, #, > or any markup syntax.",
 			"For lists use simple dashes or bullets (•). For code, just paste the code as-is without fencing.",
+			"Keep chat rhythm breezy: break thoughts into short 2-3 sentence paragraphs separated by a blank line, using soft, natural conversational phrasing rather than dense text walls or rigid bullet dumps.",
+			"Do not write ALL CAPS header lines or long separator lines (such as `-----`); prioritize airy line breaks optimized for phone screens.",
 			"",
 		}
 	default:
@@ -665,20 +672,18 @@ func buildPersonaReminder(files []bootstrap.ContextFile, agentType, providerType
 }
 
 // needsSOULEcho returns true for providers that benefit from recency-zone personality echo.
-// GPT models have strong recency bias and tend to lose persona in long prompts.
-// Matches first-party OpenAI (chatgpt_oauth) and Codex only — not compat proxies.
+// Most LLMs (OpenAI, Gemini, Vertex, DashScope, Ollama, OpenAI-compat, etc.) benefit from
+// repeating key personality traits near the generation point to combat instruction dilution.
+// Anthropic models (claude/acp) are exempt as they follow early system prompt instructions faithfully.
 func needsSOULEcho(providerType string) bool {
-	lower := strings.ToLower(providerType)
-	if strings.Contains(lower, "compat") {
-		return false // openai_compat routes to non-OpenAI models
+	lower := strings.ToLower(strings.TrimSpace(providerType))
+	if lower == "" {
+		return false
 	}
-	switch {
-	case lower == "openai" || lower == "codex":
-		return true
-	case strings.Contains(lower, "chatgpt"):
-		return true // chatgpt_oauth, chatgpt_plus, etc.
+	if lower == "anthropic" || lower == "acp" {
+		return false
 	}
-	return false
+	return true
 }
 
 // extractSOULEcho pulls the Style and Vibe sections from SOUL.md for recency reinforcement.

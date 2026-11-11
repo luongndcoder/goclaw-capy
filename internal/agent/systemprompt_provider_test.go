@@ -20,15 +20,126 @@ func TestSOULEchoForGPT(t *testing.T) {
 	}
 }
 
-// TestNoSOULEchoForAnthropic verifies SOUL echo is NOT injected for Anthropic.
+// TestNoSOULEchoForAnthropic verifies SOUL echo is NOT injected for Anthropic or ACP.
 func TestNoSOULEchoForAnthropic(t *testing.T) {
 	files := []bootstrap.ContextFile{{
 		Path: "SOUL.md", Content: "# Fox\n## Style\nPlayful",
 	}}
-	reminder := buildPersonaReminder(files, "predefined", "anthropic")
-	joined := strings.Join(reminder, "\n")
-	if strings.Contains(joined, "SOUL echo") {
-		t.Error("Anthropic should not have SOUL echo")
+	for _, provider := range []string{"anthropic", "acp", "Anthropic", "ACP", ""} {
+		reminder := buildPersonaReminder(files, "predefined", provider)
+		joined := strings.Join(reminder, "\n")
+		if strings.Contains(joined, "SOUL echo") {
+			t.Errorf("provider %q should not have SOUL echo", provider)
+		}
+	}
+}
+
+// TestSOULEchoForProviders verifies SOUL echo is injected for providers susceptible to instruction dilution.
+func TestSOULEchoForProviders(t *testing.T) {
+	files := []bootstrap.ContextFile{{
+		Path: "SOUL.md", Content: "# Fox\n## Style\nPlayful, curious",
+	}}
+	providers := []string{
+		"openai",
+		"codex",
+		"chatgpt_oauth",
+		"openai_compat",
+		"gemini",
+		"vertex",
+		"dashscope",
+		"ollama",
+	}
+	for _, p := range providers {
+		reminder := buildPersonaReminder(files, "predefined", p)
+		joined := strings.Join(reminder, "\n")
+		if !strings.Contains(joined, "SOUL echo") {
+			t.Errorf("provider %q should have SOUL echo", p)
+		}
+	}
+}
+
+func TestNeedsSOULEcho(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"anthropic", false},
+		{"acp", false},
+		{"Anthropic", false},
+		{"ACP", false},
+		{"openai", true},
+		{"codex", true},
+		{"chatgpt", true},
+		{"openai_compat", true},
+		{"gemini", true},
+		{"vertex", true},
+		{"dashscope", true},
+		{"ollama", true},
+	}
+	for _, tc := range cases {
+		got := needsSOULEcho(tc.provider)
+		if got != tc.want {
+			t.Errorf("needsSOULEcho(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}
+
+func TestBuildChannelFormattingHint_Zalo(t *testing.T) {
+	for _, ch := range []string{"zalo", "zalo_personal"} {
+		lines := buildChannelFormattingHint(ch)
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "## Output Formatting") {
+			t.Errorf("channel %s missing Output Formatting header", ch)
+		}
+		if !strings.Contains(joined, "short 2-3 sentence paragraphs") {
+			t.Errorf("channel %s missing rhythm guidance", ch)
+		}
+		if !strings.Contains(joined, "Do not write ALL CAPS header lines") {
+			t.Errorf("channel %s missing all-caps prohibition", ch)
+		}
+	}
+	if got := buildChannelFormattingHint("telegram"); got != nil {
+		t.Errorf("telegram should not have channel formatting hint, got %v", got)
+	}
+}
+
+func TestBuildExecutionBiasSection_TactGuidance(t *testing.T) {
+	lines := buildExecutionBiasSection()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Commentary-only turns are incomplete") {
+		t.Error("missing action-oriented bias")
+	}
+	if !strings.Contains(joined, "tactful clarifying question") {
+		t.Error("missing tactful clarifying guidance for ambiguous queries")
+	}
+}
+
+func TestBuildToolCallStyleSection_ConversationalSynthesis(t *testing.T) {
+	lines := buildToolCallStyleSection()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "synthesize tool results into natural, conversational language") {
+		t.Error("missing conversational tool result synthesis instruction")
+	}
+	if !strings.Contains(joined, "Never whine, vent frustration, blame internal systems, or leak technical jargon") {
+		t.Error("missing graceful failure guidance")
+	}
+}
+
+func TestSkillCreationGuidance_SuppressesMentionToUser(t *testing.T) {
+	// 1. buildSkillsSection
+	secLines := buildSkillsSection("", false, true)
+	joinedSec := strings.Join(secLines, "\n")
+	if !strings.Contains(joinedSec, "Never mention skills, `skill_manage`, or \"saving as a skill\" to the user") {
+		t.Error("buildSkillsSection missing silence instruction for skill creation")
+	}
+
+	// 2. buildSkillsHybridSection
+	hybridLines := buildSkillsHybridSection("", false, true)
+	joinedHybrid := strings.Join(hybridLines, "\n")
+	if !strings.Contains(joinedHybrid, "Never mention skills, `skill_manage`, or \"saving as a skill\" to the user") {
+		t.Error("buildSkillsHybridSection missing silence instruction for skill creation")
 	}
 }
 
