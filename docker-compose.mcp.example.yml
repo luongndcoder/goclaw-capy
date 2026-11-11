@@ -1,0 +1,156 @@
+# docker-compose.mcp.example.yml — Template for local/VPS MCP sidecar overlay.
+# Copy this file to `docker-compose.mcp.yml` and configure secrets in `.env.mcp`.
+#
+# Usage:
+#   cp docker-compose.mcp.example.yml docker-compose.mcp.yml
+#   ./deploy-mcp.sh config
+#   ./deploy-mcp.sh up -d
+#
+# Required variables in .env.mcp (or .env):
+#   - GOOGLE_DOCS_MASTER_CLIENT_ID
+#   - GOOGLE_DOCS_MASTER_CLIENT_SECRET
+#   - GOOGLE_DOCS_TAIDAO_CLIENT_ID
+#   - GOOGLE_DOCS_TAIDAO_CLIENT_SECRET
+#   - GOOGLE_DRIVE_FOLDER_ID
+#   - LEOX_PORTFOLIO_ID (defaults to EASY_INVEST1)
+#   - LEOX_JWT
+#   - LEOX_FP
+
+services:
+  goclaw:
+    depends_on:
+      - mcp-sheets
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # gws CLI (pinned host binary) + OAuth credentials for SecureCLI
+      - /opt/deploy/goclaw/bin/gws:/usr/local/bin/gws:ro
+      - /opt/deploy/goclaw/credentials:/creds:ro
+
+  goclaw-ui:
+    # !override replaces the ports list (compose appends by default → would re-add
+    # the pristine 3000 which is taken by another container). Bind ONLY 3001.
+    ports: !override
+      - "0.0.0.0:${GOCLAW_UI_PORT:-3001}:80"
+    # Serve the SPA from the Go backend (embedded web UI) so runtime branding
+    # (app name, logo, meta) injected by the gateway is applied.
+    volumes:
+      - /opt/deploy/goclaw/ui/nginx-embedded.conf:/etc/nginx/conf.d/default.conf:ro
+
+  mcp-sheets:
+    image: goclaw-mcp-sheets:local
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: docker/mcp-sheets.Dockerfile
+    # Internal only: no host port. Reached via goclaw-net (mcp-sheets:8000).
+    environment:
+      # Service Account auth (permanent, no expiry) - takes priority over OAuth in mcp-google-sheets
+      - SERVICE_ACCOUNT_PATH=/credentials/sa-sheets.json
+      - CREDENTIALS_PATH=/credentials/googlesheet-mcp-credentials.json
+      - TOKEN_PATH=/credentials/token.json
+      - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
+    volumes:
+      - /opt/deploy/goclaw/credentials:/credentials
+      - /opt/deploy/goclaw/credentials/mcp_sheets_wrapper.py:/wrapper.py:ro
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+  mcp-docs-master:
+    image: goclaw-mcp-docs:local
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: docker/mcp-docs.Dockerfile
+    # Internal only: no host port. Reached via goclaw-net (mcp-docs-master:8000).
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_DOCS_MASTER_CLIENT_ID:?}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_DOCS_MASTER_CLIENT_SECRET:?}
+      # Permanent auth: service account JWT takes priority over the OAuth
+      # refresh token inside @a-bonus/google-docs-mcp (same SA the sheets
+      # sidecars use). Share Docs/files with the SA email for access.
+      - SERVICE_ACCOUNT_PATH=/credentials/sa-sheets.json
+    volumes:
+      - /opt/deploy/goclaw/credentials/google-docs-mcp-token.json:/root/.config/google-docs-mcp/token.json:ro
+      - /opt/deploy/goclaw/credentials/sa-sheets.json:/credentials/sa-sheets.json:ro
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+  mcp-docs-taidao:
+    image: goclaw-mcp-docs:local
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: docker/mcp-docs.Dockerfile
+    # Internal only: no host port. Reached via goclaw-net (mcp-docs-taidao:8000).
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_DOCS_TAIDAO_CLIENT_ID:?}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_DOCS_TAIDAO_CLIENT_SECRET:?}
+      # Permanent auth: service account JWT takes priority over the OAuth
+      # refresh token inside @a-bonus/google-docs-mcp (same SA the sheets
+      # sidecars use). Share Docs/files with the SA email for access.
+      - SERVICE_ACCOUNT_PATH=/credentials/sa-sheets.json
+    volumes:
+      - /opt/deploy/goclaw/credentials/google-docs-mcp-token-taidao.json:/root/.config/google-docs-mcp/token.json:ro
+      - /opt/deploy/goclaw/credentials/sa-sheets.json:/credentials/sa-sheets.json:ro
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+  mcp-sheets-taidao:
+    image: goclaw-mcp-sheets:local
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: docker/mcp-sheets.Dockerfile
+    # Internal only: no host port. Reached via goclaw-net (mcp-sheets-taidao:8000).
+    environment:
+      # Service Account auth (permanent, no expiry) - takes priority over OAuth in mcp-google-sheets
+      - SERVICE_ACCOUNT_PATH=/credentials/sa-sheets.json
+      - CREDENTIALS_PATH=/credentials/googlesheet-mcp-credentials-taidao.json
+      - TOKEN_PATH=/credentials/sheets-token-taidao.json
+    volumes:
+      - /opt/deploy/goclaw/credentials:/credentials
+      - /opt/deploy/goclaw/credentials/mcp_sheets_wrapper.py:/wrapper.py:ro
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+  notebooklm:
+    build:
+      context: ${GOCLAW_DIR:-.}
+      dockerfile: docker/notebooklm.Dockerfile
+    # Internal only: no host port binding. GoClaw reaches it via docker network
+    # (goclaw-net) at notebooklm:8000. Blocks internet scanners probing :8004.
+    environment:
+      - NOTEBOOKLM_MCP_TRANSPORT=http
+      - NOTEBOOKLM_MCP_PORT=8000
+      - NOTEBOOKLM_MCP_DEBUG=${NOTEBOOKLM_MCP_DEBUG:-false}
+      - NOTEBOOKLM_ALLOW_EXTERNAL_BIND=1
+    volumes:
+      - notebooklm-auth:/root/.notebooklm-mcp-cli
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+  mcp-leox:
+    image: mcp-leox:latest
+    # Internal only: no host port. Reached via goclaw-net (mcp-leox:8000).
+    environment:
+      - LEOX_BASE_URL=https://leox.vn/leox-v2/api
+      - LEOX_PORTFOLIO_ID=${LEOX_PORTFOLIO_ID:-EASY_INVEST1}
+      - LEOX_JWT=${LEOX_JWT:?}
+      - LEOX_FP=${LEOX_FP:?}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+      - LEOX_ALLOWED_HOSTS=mcp-leox:8000
+    networks:
+      - goclaw-net
+    restart: unless-stopped
+
+volumes:
+  goclaw-data:
+    name: goclaw-data
+  goclaw-workspace:
+    name: goclaw-workspace
+  notebooklm-auth:
+    name: notebooklm-auth

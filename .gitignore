@@ -28,6 +28,7 @@ backup/
 .env*
 !.env.example
 !.env.cloudflared.example
+.env.mcp
 
 app
 browser-poc
@@ -98,6 +99,7 @@ goclaw.db-shm
 ui/desktop/frontend/dist/index.html
 
 # Local compose modules
+docker-compose.mcp.yml
 compose.d/*
 !compose.d/.gitkeep
 !compose.d/0*
