@@ -121,3 +121,97 @@ func TestSanitizeOutbound_GenericServerDump(t *testing.T) {
 		t.Errorf("small snippet wrongly stripped:\n%s", got)
 	}
 }
+
+// TestSanitizeOutbound_ConfigFencesPreserved guards that valid configuration code blocks
+// (docker-compose, yaml, toml, etc.) are NOT stripped merely for having >= 4 key: value lines,
+// while real leaks (skill metadata, untrusted envelopes, stack traces, json dumps) remain stripped.
+func TestSanitizeOutbound_ConfigFencesPreserved(t *testing.T) {
+	// 1. Valid docker-compose YAML with >= 8 key: value lines must be preserved.
+	compose := "Dạ anh tham khảo file compose này nhé:\n" +
+		"```yaml\n" +
+		"version: '3.8'\n" +
+		"services:\n" +
+		"  web:\n" +
+		"    image: nginx:alpine\n" +
+		"    container_name: web_server\n" +
+		"    ports:\n" +
+		"      - \"80:80\"\n" +
+		"    environment:\n" +
+		"      NODE_ENV: production\n" +
+		"      PORT: 80\n" +
+		"    restart: always\n" +
+		"```\n" +
+		"Anh chạy `docker compose up -d` nhé!"
+
+	got := SanitizeOutbound(compose)
+	for _, keep := range []string{
+		"```yaml",
+		"version: '3.8'",
+		"image: nginx:alpine",
+		"container_name: web_server",
+		"NODE_ENV: production",
+		"restart: always",
+		"docker compose up -d",
+	} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("lost valid yaml config content %q, got:\n%s", keep, got)
+		}
+	}
+
+	// 2. YAML containing skill leak (name + description) must be stripped.
+	skillLeak := "Đây là cấu hình:\n" +
+		"```yaml\n" +
+		"name: secret-skill-manager\n" +
+		"description: \"Internal tool for privileged operations.\"\n" +
+		"version: 1.0\n" +
+		"author: admin\n" +
+		"```\nHết."
+	gotSkill := SanitizeOutbound(skillLeak)
+	if strings.Contains(gotSkill, "secret-skill-manager") || strings.Contains(gotSkill, "privileged operations") {
+		t.Errorf("leaked skill YAML metadata:\n%s", gotSkill)
+	}
+
+	// 3. YAML containing external_untrusted_content or traceback must be stripped.
+	yamlUntrusted := "Kết quả:\n" +
+		"```yaml\n" +
+		"app: test\n" +
+		"note: external_untrusted_content leaked\n" +
+		"status: ok\n" +
+		"```\n" +
+		"Xong."
+	gotUntrusted := SanitizeOutbound(yamlUntrusted)
+	if strings.Contains(gotUntrusted, "external_untrusted_content") || strings.Contains(gotUntrusted, "app: test") {
+		t.Errorf("leaked untrusted YAML content:\n%s", gotUntrusted)
+	}
+
+	yamlTraceback := "Lỗi:\n" +
+		"```yaml\n" +
+		"service: api\n" +
+		"error: Traceback (most recent call last):\n" +
+		"  File \"app.py\", line 42\n" +
+		"```\n" +
+		"Báo lại sau."
+	gotTraceback := SanitizeOutbound(yamlTraceback)
+	if strings.Contains(gotTraceback, "service: api") || strings.Contains(gotTraceback, "Traceback") {
+		t.Errorf("leaked traceback in YAML:\n%s", gotTraceback)
+	}
+
+	// 4. JSON MCP dump must still be stripped.
+	jsonDump := "Dữ liệu trả về:\n" +
+		"```json\n" +
+		"{\n" +
+		"  \"status\": \"success\",\n" +
+		"  \"items\": [1, 2, 3],\n" +
+		"  \"count\": 3,\n" +
+		"  \"page\": 1\n" +
+		"}\n" +
+		"```\n" +
+		"Có 3 mục."
+	gotJSON := SanitizeOutbound(jsonDump)
+	if strings.Contains(gotJSON, "\"status\": \"success\"") || strings.Contains(gotJSON, "\"items\"") {
+		t.Errorf("leaked JSON MCP dump:\n%s", gotJSON)
+	}
+	if !strings.Contains(gotJSON, "Có 3 mục.") {
+		t.Errorf("lost user prose in JSON dump test:\n%s", gotJSON)
+	}
+}

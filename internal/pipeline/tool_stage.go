@@ -70,6 +70,9 @@ func isWriteTool(name string) bool {
 		"write_file": true, "edit": true, "exec": true, "bash": true,
 		"cron": true, "send_file": true, "message": true,
 		"create_image": true, "create_audio": true, "create_video": true,
+		// delegation & management tools
+		"delegate": true, "spawn": true, "team_tasks": true,
+		"skill_manage": true, "publish_skill": true, "sessions_send": true,
 	}
 	if writeTools[name] {
 		return true

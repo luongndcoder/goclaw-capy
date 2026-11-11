@@ -43,9 +43,18 @@ func SanitizeOutbound(text string) string {
 	// Genuine code answers the user asked for are kept.
 	if fenceRe.MatchString(text) {
 		text = fenceRe.ReplaceAllStringFunc(text, func(fence string) string {
-			if isMachineOutputBody(fenceBody(fence)) {
-				redactions++
-				return ""
+			lang := fenceLang(fence)
+			body := fenceBody(fence)
+			if isConfigFenceLang(lang) {
+				if isMachineOutputConfigBody(body) {
+					redactions++
+					return ""
+				}
+			} else {
+				if isMachineOutputBody(body) {
+					redactions++
+					return ""
+				}
 			}
 			return fence
 		})
@@ -149,7 +158,7 @@ var (
 	stackTraceLineRe = regexp.MustCompile(`(?m)^\s*(?:at\s+\S.*\(.*:\d+.*\)|goroutine\s+\d+.*|.*\.go:\d+.*|Traceback \(most recent call last\):|File ".+", line \d+.*)$`)
 
 	// Fenced code blocks — body inspected before removal.
-	fenceRe = regexp.MustCompile("(?s)```[a-zA-Z]*\\n.*?```")
+	fenceRe = regexp.MustCompile("(?s)```[a-zA-Z0-9_.-]*\\n.*?```")
 
 	// YAML frontmatter dumps pasted from files (--- key: ... ---).
 	frontmatterRe = regexp.MustCompile(`(?ms)^---\n(?:[A-Za-z_][\w-]*: .+\n){2,}---`)
@@ -179,6 +188,19 @@ var (
 	blankRunRe = regexp.MustCompile(`\n{3,}`)
 )
 
+// fenceLang extracts the language identifier from the opening ``` tag (e.g. "yaml", "json", "").
+func fenceLang(fence string) string {
+	s := strings.TrimSpace(fence)
+	s = strings.TrimPrefix(s, "```")
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		first := strings.TrimSpace(before)
+		if first != "" && !strings.ContainsAny(first, " \t{}[]") {
+			return strings.ToLower(first)
+		}
+	}
+	return ""
+}
+
 // fenceBody strips the opening/closing ``` markers (and language tag) so the
 // body can be inspected structurally.
 func fenceBody(fence string) string {
@@ -192,6 +214,84 @@ func fenceBody(fence string) string {
 	}
 	body = strings.TrimSuffix(strings.TrimSpace(body), "```")
 	return strings.TrimSpace(body)
+}
+
+// configFenceLangs enumerates language tags for human-written configuration files
+// where key-value pairs (kvLineRe >= 4) are legitimate answers rather than tool dumps.
+var configFenceLangs = map[string]bool{
+	"yaml":           true,
+	"yml":            true,
+	"dockerfile":     true,
+	"nginx":          true,
+	"toml":           true,
+	"ini":            true,
+	"conf":           true,
+	"http":           true,
+	"env":            true,
+	"docker-compose": true,
+	"compose":        true,
+	"properties":     true,
+	"cfg":            true,
+}
+
+func isConfigFenceLang(lang string) bool {
+	return configFenceLangs[strings.ToLower(lang)]
+}
+
+// isSkillMetadata checks whether the body contains both name: and description:
+// fields characteristic of SKILL.md YAML frontmatter leakage.
+func isSkillMetadata(body string) bool {
+	hasName := false
+	hasDesc := false
+	for ln := range strings.SplitSeq(body, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "name:") {
+			hasName = true
+		}
+		if strings.HasPrefix(trimmed, "description:") {
+			hasDesc = true
+		}
+	}
+	return hasName && hasDesc
+}
+
+// isMachineOutputConfigBody checks structural leakage in config code fences
+// (yaml, toml, dockerfile, nginx...) while exempting benign key: value records.
+func isMachineOutputConfigBody(body string) bool {
+	if body == "" {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, s := range []string{
+		"external_untrusted_content",
+		"traceback (most recent call last)",
+		"goroutine ",
+		"[credentialed exec]",
+		"stderr:",
+	} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	if frontmatterRe.MatchString(body) {
+		return true
+	}
+	if isSkillMetadata(body) {
+		return true
+	}
+	indexed := 0
+	for ln := range strings.SplitSeq(body, "\n") {
+		if machineEchoLineRe.MatchString(ln) || stackTraceLineRe.MatchString(ln) {
+			return true
+		}
+		if indexedRowRe.MatchString(ln) {
+			indexed++
+			if indexed >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isMachineOutputBody reports whether a fenced block body is pasted
@@ -225,7 +325,7 @@ func isMachineOutputBody(body string) bool {
 		}
 	}
 	indexed := 0
-	for _, ln := range strings.Split(body, "\n") {
+	for ln := range strings.SplitSeq(body, "\n") {
 		if machineEchoLineRe.MatchString(ln) || stackTraceLineRe.MatchString(ln) {
 			return true
 		}
@@ -257,7 +357,7 @@ func isDataDump(body string) bool {
 	}
 	// Key: value record dumps (YAML-ish tool output without braces).
 	kv := 0
-	for _, ln := range strings.Split(trimmed, "\n") {
+	for ln := range strings.SplitSeq(trimmed, "\n") {
 		t := strings.TrimSpace(ln)
 		if t == "" || t == "---" || strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "#") {
 			continue

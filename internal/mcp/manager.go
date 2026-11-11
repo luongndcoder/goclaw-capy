@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,11 +28,22 @@ const (
 	maxReconnectAttempts = 10
 	reconnectCooldown    = 5 * time.Minute // wait after exhausting reconnect attempts before retrying
 
-	// mcpToolInlineMaxCount is the threshold above which MCP tools switch
+	// defaultMCPToolInlineMaxCount is the fallback threshold above which MCP tools switch
 	// to search mode (deferred loading via mcp_tool_search) instead of
 	// being registered inline in the tool registry.
-	mcpToolInlineMaxCount = 120
+	defaultMCPToolInlineMaxCount = 20
 )
+
+// mcpToolInlineThreshold returns the maximum number of MCP tools to register inline
+// before switching excess tools to deferred search mode. Configurable via GOCLAW_MCP_INLINE_MAX_COUNT.
+func mcpToolInlineThreshold() int {
+	if s := os.Getenv("GOCLAW_MCP_INLINE_MAX_COUNT"); s != "" {
+		if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && v > 0 {
+			return v
+		}
+	}
+	return defaultMCPToolInlineMaxCount
+}
 
 // ServerStatus reports the connection status of an MCP server.
 type ServerStatus struct {
@@ -91,8 +104,8 @@ type serverState struct {
 //   - Config-based: reads from config.MCPServerConfig map (shared across all agents)
 //   - DB-backed: queries MCPServerStore per agent+user for permission-filtered servers
 //
-// When total MCP tool count exceeds mcpToolInlineMaxCount, the manager
-// enters hybrid search mode: the first mcpToolInlineMaxCount tools stay
+// When total MCP tool count exceeds mcpToolInlineThreshold(), the manager
+// enters hybrid search mode: the first inline tools stay
 // registered inline, while excess tools move to deferredTools and are
 // discovered via mcp_tool_search. Tools are activated on demand via
 // ActivateTools().
@@ -467,17 +480,18 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 }
 
 // maybeEnterSearchMode partially defers MCP tools when total count exceeds
-// the inline threshold. The first mcpToolInlineMaxCount tools stay registered
+// the inline threshold. The first tools up to threshold stay registered
 // inline; the rest are moved to deferredTools and discovered via mcp_tool_search.
 func (m *Manager) maybeEnterSearchMode() {
 	allNames := m.ToolNames()
-	if len(allNames) <= mcpToolInlineMaxCount {
+	threshold := mcpToolInlineThreshold()
+	if len(allNames) <= threshold {
 		return
 	}
 
 	// Build a set of names to defer (everything beyond the threshold).
-	deferSet := make(map[string]struct{}, len(allNames)-mcpToolInlineMaxCount)
-	for _, name := range allNames[mcpToolInlineMaxCount:] {
+	deferSet := make(map[string]struct{}, len(allNames)-threshold)
+	for _, name := range allNames[threshold:] {
 		deferSet[name] = struct{}{}
 	}
 
@@ -519,14 +533,14 @@ func (m *Manager) maybeEnterSearchMode() {
 	}
 
 	// Update "mcp" group to only the kept inline names.
-	inlineNames := allNames[:mcpToolInlineMaxCount]
+	inlineNames := allNames[:threshold]
 	m.registry.RegisterToolGroup("mcp", inlineNames)
 	m.searchMode = true
 
 	slog.Info("mcp.search_mode.enabled",
 		"inline_tools", len(inlineNames),
 		"deferred_tools", len(m.deferredTools),
-		"threshold", mcpToolInlineMaxCount)
+		"threshold", threshold)
 }
 
 // IsSearchMode reports whether the manager is in deferred/search mode.

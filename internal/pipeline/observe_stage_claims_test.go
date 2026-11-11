@@ -110,7 +110,7 @@ func TestObserveStage_AsyncGuard_BlocksClaimWithOutstanding(t *testing.T) {
 	st := defaultState()
 	st.Ctx = context.Background()
 	st.Tool.AsyncOutstanding = 2
-	st.Think.LastResponse = &providers.ChatResponse{Content: "Hoàn thành rồi anh nhé"}
+	st.Think.LastResponse = &providers.ChatResponse{Content: "Đã hoàn thành việc cập nhật rồi anh nhé"}
 	if err := stage.Execute(t.Context(), st); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestObserveStage_GuardsAppendToneGuidance(t *testing.T) {
 	stAsync := defaultState()
 	stAsync.Ctx = context.Background()
 	stAsync.Tool.AsyncOutstanding = 1
-	stAsync.Think.LastResponse = &providers.ChatResponse{Content: "Xong rồi anh nhé"}
+	stAsync.Think.LastResponse = &providers.ChatResponse{Content: "Đã cập nhật xong rồi anh nhé"}
 	if err := stageAsync.Execute(t.Context(), stAsync); err != nil {
 		t.Fatalf("async Execute: %v", err)
 	}
@@ -187,5 +187,53 @@ func TestObserveStage_GuardsAppendToneGuidance(t *testing.T) {
 	}
 	if !strings.Contains(pendingFab[1].Content, "phong cách ấm áp, tự nhiên") {
 		t.Errorf("fabrication guard retry message missing tone guidance:\n%s", pendingFab[1].Content)
+	}
+}
+
+// TestClaimsWriteCompletion_NegationAndIntent guards against false-positives
+// from negation, future intent, and polite read-only statements.
+func TestClaimsWriteCompletion_NegationAndIntent(t *testing.T) {
+	t.Parallel()
+
+	// Negation cases: must NOT be detected as write completion claims.
+	negatedPhrases := []string{
+		"Dạ có 3 học viên chưa hoàn thành học phí",
+		"Em chưa cập nhật dòng nào trên doc",
+		"Hiện em không thể ghi vào bảng tính",
+		"The sheet has not been updated yet",
+		"The sheet hasn't been updated",
+		"Dạ em chưa cập nhật xong",
+		"Dạ em không thể cập nhật xong trong hôm nay",
+		"Để em cập nhật xong em báo anh nhé",
+		"Dạ em sẽ cập nhật xong sớm",
+	}
+	for _, s := range negatedPhrases {
+		if claimsWriteCompletion(s) {
+			t.Errorf("negated/intent phrase wrongly flagged as write claim: %q", s)
+		}
+	}
+
+	// Mixed sentences: clause 1 negated, clause 2 has valid write claim.
+	mixed := "Cột A em chưa sửa, còn cột B em đã cập nhật giá mới"
+	if !claimsWriteCompletion(mixed) {
+		t.Errorf("mixed sentence with valid claim must return true: %q", mixed)
+	}
+
+	mixed2 := "Dòng 1 em chưa cập nhật xong, nhưng dòng 2 em đã cập nhật xong"
+	if !claimsWriteCompletion(mixed2) {
+		t.Errorf("mixed sentence with valid claim must return true: %q", mixed2)
+	}
+
+	// Read-only / polite queries: must NOT be detected as write completion claims.
+	readOnlyPhrases := []string{
+		"Dạ em kiểm tra xong rồi ạ, hôm nay chưa có biến động mới",
+		"Có 5 học viên đã hoàn thành học phí",
+		"Báo cáo đã hoàn tất từ tuần trước",
+		"Em đã tra cứu xong thông tin cho anh",
+	}
+	for _, s := range readOnlyPhrases {
+		if claimsWriteCompletion(s) {
+			t.Errorf("read-only phrase wrongly flagged as write claim: %q", s)
+		}
 	}
 }

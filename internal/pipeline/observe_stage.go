@@ -252,31 +252,146 @@ func claimsWriteCompletion(text string) bool {
 		return false
 	}
 	lower := strings.ToLower(text)
-	claims := []string{
-		"đã áp dụng", "đã đặt", "đã chuyển công thức", "đã cập nhật",
-		"đã chỉnh", "đã định dạng", "đã format", "đã thêm",
-		"đã xoá", "đã xóa", "đã ghi", "đã sửa", "đã tạo",
-		"đã đổi", "đã set", "đã thiết lập", "đã nới rộng",
-		"đã cài đặt", "đã hoàn thiện", "đã thực hiện",
-		"đã bổ sung", "đã điền", "đã gán", "đã chèn",
-		// Write-specific additions: commonly seen in sheets/file tasks
-		// that previously bypassed the guard and reached users as "done".
-		"đã xử lý", "đã lưu", "đã nhập", "đã đồng bộ", "đã xuất",
-		"đã xong", "đã hoàn thành", "đã hoàn tất", "đã làm xong",
-		"xong rồi", "hoàn thành", "hoàn tất",
-		// English claims
-		"i have updated", "i updated", "i have formatted", "i formatted",
-		"i have set", "i set the", "i have added", "i added", "i have saved",
-		"i saved", "i have created", "i created", "done - updated",
-		"has been updated", "has been saved", "has been created",
-		"successfully updated", "successfully saved", "written to",
-		"exported", "synced",
+	for _, c := range writeClaims {
+		start := 0
+		for {
+			idx := strings.Index(lower[start:], c)
+			if idx < 0 {
+				break
+			}
+			absIdx := start + idx
+			if !isNegatedOccurrence(lower, absIdx) {
+				return true
+			}
+			start = absIdx + len(c)
+		}
 	}
-	for _, c := range claims {
-		if strings.Contains(lower, c) {
+	return false
+}
+
+var writeClaims = []string{
+	// Vietnamese past/completed write actions
+	"đã áp dụng", "đã đặt", "đã chuyển công thức", "đã cập nhật",
+	"đã chỉnh", "đã định dạng", "đã format", "đã thêm",
+	"đã xoá", "đã xóa", "đã ghi", "đã sửa", "đã tạo",
+	"đã đổi", "đã set", "đã thiết lập", "đã nới rộng",
+	"đã cài đặt", "đã hoàn thiện",
+	"đã bổ sung", "đã điền", "đã gán", "đã chèn",
+	"đã lưu", "đã nhập", "đã đồng bộ", "đã xuất",
+	"đã xử lý xong", "đã làm xong",
+	// Vietnamese write verbs with completion suffixes
+	"cập nhật xong", "ghi xong", "sửa xong", "thêm xong",
+	"định dạng xong", "format xong", "lưu xong", "xử lý xong",
+	"nhập xong", "nhập liệu xong", "xóa xong", "xoá xong",
+	"tạo xong", "điền xong", "gán xong", "chèn xong",
+	"đồng bộ xong", "thiết lập xong", "cài đặt xong",
+	// Explicit write completion compounds
+	"hoàn thành việc nhập", "hoàn thành việc cập nhật", "hoàn thành việc sửa",
+	"hoàn tất việc nhập", "hoàn tất việc cập nhật", "hoàn tất việc sửa",
+	"hoàn tất đồng bộ", "hoàn thành đồng bộ", "hoàn thành nhập liệu",
+	"hoàn tất nhập liệu", "hoàn thành cập nhật", "hoàn tất cập nhật",
+	"hoàn tất chỉnh sửa", "hoàn thành chỉnh sửa",
+	// English write claims
+	"i have updated", "i updated", "i have formatted", "i formatted",
+	"i have set", "i set the", "i have added", "i added", "i have saved",
+	"i saved", "i have created", "i created", "done - updated",
+	"has been updated", "have been updated", "been updated",
+	"has been saved", "have been saved", "been saved",
+	"has been created", "have been created", "been created",
+	"successfully updated", "successfully saved", "written to",
+	"i exported", "has been exported", "have been exported", "exported to",
+	"i synced", "has been synced", "have been synced", "synced to", "synced with",
+}
+
+// isNegatedOccurrence checks whether an occurrence of a claim phrase at idx
+// is preceded by negation or future/intent markers in the current clause.
+func isNegatedOccurrence(text string, idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	prefix := text[:idx]
+
+	// Find the start of the current clause.
+	clauseStart := 0
+	clauseSeparators := []string{
+		".", ",", "!", "?", ";", ":", "\n", "(", ")", "[", "]", "—", "-",
+		" nhưng ", " nhưng mà ", " còn ", " tuy nhiên ", " song ", " but ", " however ", " whereas ",
+	}
+	for _, sep := range clauseSeparators {
+		if pos := strings.LastIndex(prefix, sep); pos >= 0 {
+			posAfter := pos + len(sep)
+			if posAfter > clauseStart {
+				clauseStart = posAfter
+			}
+		}
+	}
+
+	clausePrefix := strings.TrimSpace(prefix[clauseStart:])
+	if clausePrefix == "" {
+		return false
+	}
+
+	tokens := strings.Fields(clausePrefix)
+	n := len(tokens)
+	if n == 0 {
+		return false
+	}
+
+	// 1. Two-word negation/intent phrases (checked at end of clausePrefix or up to 3 tokens back).
+	twoWordPhrases := map[string]bool{
+		"chưa thể":   true,
+		"chưa kịp":   true,
+		"chưa hề":    true,
+		"không thể":  true,
+		"chẳng thể":  true,
+		"để em":      true,
+		"để tôi":     true,
+		"để mình":    true,
+		"unable to":  true,
+		"going to":   true,
+		"need to":    true,
+	}
+	for i := max(0, n-3); i < n-1; i++ {
+		pair := tokens[i] + " " + tokens[i+1]
+		if twoWordPhrases[pair] {
 			return true
 		}
 	}
+
+	// 2. Single-word negation/intent words.
+	singleWordNegations := map[string]bool{
+		// Vietnamese
+		"chưa": true, "không": true, "chẳng": true, "chả": true,
+		"sắp": true, "sẽ": true, "cần": true, "muốn": true, "định": true, "nên": true,
+		// English
+		"not": true, "never": true, "haven't": true, "hasn't": true,
+		"didn't": true, "cannot": true, "can't": true, "couldn't": true,
+		"will": true,
+	}
+
+	// Check single words in the tail (up to 3 tokens back).
+	tailStart := max(0, n-3)
+	for i := tailStart; i < n; i++ {
+		tok := tokens[i]
+		if singleWordNegations[tok] {
+			// Intent words ("cần", "muốn", "định", "nên") only negate if immediately preceding
+			// and not followed by a past marker "đã" / "has" / "have".
+			if tok == "cần" || tok == "muốn" || tok == "định" || tok == "nên" {
+				hasPastMarker := false
+				for j := i + 1; j < n; j++ {
+					if tokens[j] == "đã" || tokens[j] == "has" || tokens[j] == "have" {
+						hasPastMarker = true
+						break
+					}
+				}
+				if hasPastMarker {
+					continue
+				}
+			}
+			return true
+		}
+	}
+
 	return false
 }
 

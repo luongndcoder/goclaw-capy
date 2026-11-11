@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -278,5 +279,78 @@ func TestRegistry_WiredToManager_MultipleActivations_AllInList(t *testing.T) {
 	// deferredTools should now be empty.
 	if got := deferredCount(m); got != 0 {
 		t.Errorf("expected 0 deferred tools after all activations, got %d", got)
+	}
+}
+
+// --- MCP Tool Inline Threshold & maybeEnterSearchMode ---
+
+func TestMCPToolInlineThreshold(t *testing.T) {
+	// 1. Default when env not set
+	t.Setenv("GOCLAW_MCP_INLINE_MAX_COUNT", "")
+	if got := mcpToolInlineThreshold(); got != defaultMCPToolInlineMaxCount {
+		t.Errorf("expected default threshold %d, got %d", defaultMCPToolInlineMaxCount, got)
+	}
+
+	// 2. Custom valid value
+	t.Setenv("GOCLAW_MCP_INLINE_MAX_COUNT", "45")
+	if got := mcpToolInlineThreshold(); got != 45 {
+		t.Errorf("expected custom threshold 45, got %d", got)
+	}
+
+	// 3. Invalid string falls back to default
+	t.Setenv("GOCLAW_MCP_INLINE_MAX_COUNT", "invalid")
+	if got := mcpToolInlineThreshold(); got != defaultMCPToolInlineMaxCount {
+		t.Errorf("expected default threshold on invalid input, got %d", got)
+	}
+
+	// 4. Non-positive value falls back to default
+	t.Setenv("GOCLAW_MCP_INLINE_MAX_COUNT", "0")
+	if got := mcpToolInlineThreshold(); got != defaultMCPToolInlineMaxCount {
+		t.Errorf("expected default threshold on zero, got %d", got)
+	}
+}
+
+func TestManager_MaybeEnterSearchMode_DefaultThreshold(t *testing.T) {
+	t.Setenv("GOCLAW_MCP_INLINE_MAX_COUNT", "") // use default 20
+
+	reg := tools.NewRegistry()
+	m := NewManager(reg)
+
+	// Register 25 tools across 1 server
+	const totalTools = 25
+	toolNames := make([]string, totalTools)
+	for i := range totalTools {
+		bt := makeBridgeTool("srv", fmt.Sprintf("tool_%02d", i))
+		toolNames[i] = bt.Name()
+		reg.Register(bt)
+	}
+
+	m.mu.Lock()
+	st := &serverState{
+		name:      "srv",
+		toolNames: toolNames,
+	}
+	st.connected.Store(true)
+	m.servers["srv"] = st
+	m.mu.Unlock()
+
+	m.maybeEnterSearchMode()
+
+	if !m.IsSearchMode() {
+		t.Fatal("expected manager to enter search mode with 25 tools > 20 threshold")
+	}
+
+	m.mu.RLock()
+	deferredLen := len(m.deferredTools)
+	m.mu.RUnlock()
+
+	if deferredLen != 5 {
+		t.Errorf("expected 5 deferred tools, got %d", deferredLen)
+	}
+
+	// Inline tools remaining in registry should be exactly defaultMCPToolInlineMaxCount (20)
+	registered := reg.List()
+	if len(registered) != defaultMCPToolInlineMaxCount {
+		t.Errorf("expected %d inline registered tools, got %d", defaultMCPToolInlineMaxCount, len(registered))
 	}
 }

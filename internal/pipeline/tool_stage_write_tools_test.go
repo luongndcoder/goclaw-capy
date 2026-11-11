@@ -89,3 +89,37 @@ func TestToolStage_WriteToolsUsed_ParallelOnlyOnSuccess(t *testing.T) {
 		t.Fatalf("failed parallel writes must NOT be recorded, got %v", st.Tool.WriteToolsUsed)
 	}
 }
+
+// TestIsWriteTool_DelegationAndManagement tests that delegation, task management,
+// skill management, and session messaging tools are recognized as mutating tools
+// so fabrication guard does not falsely trigger when agents delegate tasks.
+func TestIsWriteTool_DelegationAndManagement(t *testing.T) {
+	t.Parallel()
+
+	delegationTools := []string{
+		"delegate",
+		"spawn",
+		"team_tasks",
+		"skill_manage",
+		"publish_skill",
+		"sessions_send",
+	}
+	for _, name := range delegationTools {
+		if !isWriteTool(name) {
+			t.Errorf("expected isWriteTool(%q) == true", name)
+		}
+	}
+
+	readTools := []string{
+		"read_file",
+		"web_search",
+		"vault_read",
+		"memory_search",
+		"mcp_sheets__get_sheet_data",
+	}
+	for _, name := range readTools {
+		if isWriteTool(name) {
+			t.Errorf("expected isWriteTool(%q) == false", name)
+		}
+	}
+}
