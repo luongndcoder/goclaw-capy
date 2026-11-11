@@ -97,15 +97,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			if name == "" {
 				name = ref.senderID
 			}
-			// Mention span covers "@Name" only — the trailing space stays
-			// outside the highlight so the reply text doesn't stick to it.
-			tag := "@" + name
-			msg.Content = tag + " " + msg.Content
-			mentions = append(mentions, protocol.Mention{
-				Pos: 0,
-				Len: utf16Len(tag),
-				UID: ref.senderID,
-			})
+			msg.Content, mentions = prepareGroupMentions(msg.Content, ref.senderID, name)
 		}
 	}
 	if msg.Content != "" {
@@ -157,25 +149,32 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 		// (group) → plain, so the reply is never lost to a malformed
 		// quote/mention payload.
 		var err error
-		if i == 0 && quote != nil {
-			err = c.sendChunkWithRetryQuote(ctx, sess, chatID, threadType, chunk, quote, mentions)
-			if err != nil {
-				slog.Warn("zalo_personal: quote send failed, degrading",
-					"chat_id", chatID, "error", err)
-				if threadType == protocol.ThreadTypeGroup && len(mentions) > 0 {
-					err = c.sendChunkWithRetryMention(ctx, sess, chatID, chunk, mentions)
-					if err != nil {
-						slog.Warn("zalo_personal: mention send failed, falling back to plain",
-							"chat_id", chatID, "error", err)
-					}
+		sent := false
+		if i == 0 {
+			chunkMentions := filterMentionsForChunk(mentions, chunk)
+			if quote != nil {
+				err = c.sendChunkWithRetryQuote(ctx, sess, chatID, threadType, chunk, quote, chunkMentions)
+				if err == nil {
+					sent = true
+				} else {
+					slog.Warn("zalo_personal: quote send failed, degrading",
+						"chat_id", chatID, "error", err)
+				}
+			}
+			if !sent && threadType == protocol.ThreadTypeGroup && len(chunkMentions) > 0 {
+				err = c.sendChunkWithRetryMention(ctx, sess, chatID, chunk, chunkMentions)
+				if err == nil {
+					sent = true
+				} else {
+					slog.Warn("zalo_personal: mention send failed, falling back to plain",
+						"chat_id", chatID, "error", err)
 				}
 			}
 		}
-		if err != nil || i > 0 || quote == nil {
+		if !sent {
 			if qerr := c.sendChunkWithRetry(ctx, sess, chatID, threadType, chunk); qerr != nil {
 				return qerr
 			}
-			continue
 		}
 	}
 	return nil
