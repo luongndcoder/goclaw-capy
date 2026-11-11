@@ -52,7 +52,6 @@ services:
       - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
     volumes:
       - /opt/deploy/goclaw/credentials:/credentials
-      - /opt/deploy/goclaw/credentials/mcp_sheets_wrapper.py:/wrapper.py:ro
     networks:
       - goclaw-net
     restart: unless-stopped
@@ -110,7 +109,6 @@ services:
       - TOKEN_PATH=/credentials/sheets-token-taidao.json
     volumes:
       - /opt/deploy/goclaw/credentials:/credentials
-      - /opt/deploy/goclaw/credentials/mcp_sheets_wrapper.py:/wrapper.py:ro
     networks:
       - goclaw-net
     restart: unless-stopped
