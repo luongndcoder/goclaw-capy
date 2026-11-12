@@ -79,3 +79,35 @@ func TestCopyRoutingMeta_PreservesBitrixVisibility(t *testing.T) {
 		t.Fatalf("CopyFinalRoutingMeta()[%q] = %q, want %q", "bitrix_visibility", got["bitrix_visibility"], "whisper")
 	}
 }
+
+// TestCopyFinalRoutingMeta_ZaloReplyMsgIDPreservedOnlyInFinal verifies that
+// zalo_reply_msg_id survives into the first final reply (CopyFinalRoutingMeta)
+// so the initial answer bubble quotes & mentions the sender, but is stripped
+// from intermediate block replies and followup splits (CopyFollowupRoutingMeta).
+func TestCopyFinalRoutingMeta_ZaloReplyMsgIDPreservedOnlyInFinal(t *testing.T) {
+	src := map[string]string{
+		"zalo_reply_msg_id": "zalo-msg-12345",
+		"group_id":          "zalo-group-999",
+	}
+
+	final := CopyFinalRoutingMeta(src)
+	if final["zalo_reply_msg_id"] != "zalo-msg-12345" {
+		t.Fatalf("CopyFinalRoutingMeta()[%q] = %q, want %q", "zalo_reply_msg_id", final["zalo_reply_msg_id"], "zalo-msg-12345")
+	}
+	if final["group_id"] != "zalo-group-999" {
+		t.Fatalf("CopyFinalRoutingMeta()[%q] = %q, want %q", "group_id", final["group_id"], "zalo-group-999")
+	}
+
+	followup := CopyFollowupRoutingMeta(src)
+	if v, exists := followup["zalo_reply_msg_id"]; exists && v != "" {
+		t.Fatalf("CopyFollowupRoutingMeta() unexpectedly kept zalo_reply_msg_id: %q", v)
+	}
+	if followup["group_id"] != "zalo-group-999" {
+		t.Fatalf("CopyFollowupRoutingMeta()[%q] = %q, want %q", "group_id", followup["group_id"], "zalo-group-999")
+	}
+
+	intermediate := copyRoutingMeta(src)
+	if v, exists := intermediate["zalo_reply_msg_id"]; exists && v != "" {
+		t.Fatalf("copyRoutingMeta() unexpectedly kept zalo_reply_msg_id: %q", v)
+	}
+}

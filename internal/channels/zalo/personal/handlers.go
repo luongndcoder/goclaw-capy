@@ -75,9 +75,10 @@ func (c *Channel) handleDM(msg protocol.UserMessage) {
 	}
 
 	metadata := map[string]string{
-		"message_id":   msg.Data.MsgID,
-		"platform":     channels.TypeZaloPersonal,
-		"display_name": channels.SanitizeDisplayName(senderName),
+		"message_id":        msg.Data.MsgID,
+		"zalo_reply_msg_id": msg.Data.MsgID,
+		"platform":          channels.TypeZaloPersonal,
+		"display_name":      channels.SanitizeDisplayName(senderName),
 	}
 	c.HandleAuthorizedMessage(senderID, threadID, content, media, metadata, "direct")
 }
@@ -114,7 +115,6 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 		content = content + "\n" + tag
 	}
 	c.rememberReplyContext(threadID, senderName, msg.Data.TMessage, cacheBodyForContent(msg.Data.Content))
-	c.rememberInboundRef(threadID, senderID, senderName, msg.Data.TMessage, body)
 
 	// Step 2: @mention gating — record non-mentioned messages in history and return.
 	if c.RequireMention() {
@@ -148,7 +148,10 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 		"preview", channels.Truncate(content, 50),
 	)
 
-	// Step 3: flush pending history + annotate current message with sender name.
+	// Step 3: remember inbound ref ONLY for messages reaching the agent, flush
+	// pending history + annotate current message with sender name.
+	c.rememberInboundRef(threadID, senderID, senderName, msg.Data.TMessage, body)
+
 	annotated := fmt.Sprintf("[From: %s]\n%s", senderName, content)
 	finalContent := annotated
 	if c.HistoryLimit() > 0 {
@@ -168,10 +171,11 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 	}
 
 	metadata := map[string]string{
-		"message_id":   msg.Data.MsgID,
-		"platform":     channels.TypeZaloPersonal,
-		"group_id":     threadID,
-		"display_name": channels.SanitizeDisplayName(senderName),
+		"message_id":        msg.Data.MsgID,
+		"zalo_reply_msg_id": msg.Data.MsgID,
+		"platform":          channels.TypeZaloPersonal,
+		"group_id":          threadID,
+		"display_name":      channels.SanitizeDisplayName(senderName),
 	}
 	c.HandleMessage(senderID, threadID, finalContent, allMedia, metadata, "group")
 
@@ -184,6 +188,9 @@ func (c *Channel) handleGroupMessage(msg protocol.GroupMessage) {
 // covers long agent runs (MCP calls + LLM turns); delivery stops it early.
 func (c *Channel) startTyping(threadID string, threadType protocol.ThreadType) {
 	sess := c.session()
+	if sess == nil {
+		return
+	}
 	ctrl := typing.New(typing.Options{
 		MaxDuration:       5 * time.Minute,
 		KeepaliveInterval: 4 * time.Second,

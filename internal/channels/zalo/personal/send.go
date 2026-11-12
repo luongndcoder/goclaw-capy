@@ -89,15 +89,18 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	// additionally @-mention the asker.
 	var quote *protocol.QuoteRef
 	var mentions []protocol.Mention
-	if ref, ok := c.loadInboundRef(msg.ChatID); ok {
-		q := ref.quote
-		quote = &q
-		if threadType == protocol.ThreadTypeGroup && ref.senderID != "" {
-			name := ref.senderName
-			if name == "" {
-				name = ref.senderID
+	replyMsgID := resolveReplyMsgID(msg.Metadata)
+	if replyMsgID != "" {
+		if ref, ok := c.loadInboundRef(msg.ChatID, replyMsgID); ok {
+			q := ref.quote
+			quote = &q
+			if threadType == protocol.ThreadTypeGroup && ref.senderID != "" {
+				name := ref.senderName
+				if name == "" {
+					name = ref.senderID
+				}
+				msg.Content, mentions = prepareGroupMentions(msg.Content, ref.senderID, name)
 			}
-			msg.Content, mentions = prepareGroupMentions(msg.Content, ref.senderID, name)
 		}
 	}
 	if msg.Content != "" {
@@ -183,7 +186,7 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 // sendChunkWithRetryQuote delivers one chunk via the quote endpoint.
 func (c *Channel) sendChunkWithRetryQuote(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, chunk string, quote *protocol.QuoteRef, mentions []protocol.Mention) error {
 	var err error
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -204,7 +207,7 @@ func (c *Channel) sendChunkWithRetryQuote(ctx context.Context, sess *protocol.Se
 // endpoint (mention without quote).
 func (c *Channel) sendChunkWithRetryMention(ctx context.Context, sess *protocol.Session, chatID, chunk string, mentions []protocol.Mention) error {
 	var err error
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -226,7 +229,7 @@ func (c *Channel) sendChunkWithRetryMention(ctx context.Context, sess *protocol.
 // the whole answer.
 func (c *Channel) sendChunkWithRetry(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, chunk string) error {
 	var err error
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():

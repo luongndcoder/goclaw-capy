@@ -2,6 +2,7 @@ package personal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal/protocol"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 )
@@ -299,4 +301,232 @@ func assertContainsInOrder(t *testing.T, text string, values ...string) {
 func strconvQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func TestHandleGroupMessage_ReplyTargetBugReproduction(t *testing.T) {
+	msgBus := bus.New()
+	ch, err := New(config.ZaloPersonalConfig{
+		DMPolicy:    "open",
+		GroupPolicy: "open",
+	}, msgBus, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	botUID := "bot-user-id"
+	ch.sess = &protocol.Session{UID: botUID}
+
+	// 1. Anh Hiển (u-hien, M1) sends "@Báo Sư Đệ ăn c k" tagging the bot.
+	msgHien := protocol.NewGroupMessage(botUID, protocol.TGroupMessage{
+		TMessage: protocol.TMessage{
+			MsgID:   "M1",
+			UIDFrom: "u-hien",
+			IDTo:    "group-zalo-1",
+			DName:   "Anh Hiển",
+			Content: textContent("@Báo Sư Đệ ăn c k"),
+		},
+		Mentions: []*protocol.TMention{
+			{Pos: 0, Len: utf16Len("@Báo Sư Đệ"), UID: botUID},
+		},
+	})
+	ch.handleGroupMessage(msgHien)
+
+	// Consume inbound from bus
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	inboundHien, ok := msgBus.ConsumeInbound(ctx)
+	if !ok {
+		t.Fatal("expected inbound message for Anh Hien")
+	}
+	if inboundHien.Metadata["zalo_reply_msg_id"] != "M1" {
+		t.Fatalf("zalo_reply_msg_id = %q, want M1", inboundHien.Metadata["zalo_reply_msg_id"])
+	}
+
+	// 2. While bot is thinking, Nguyễn Lương (u-luong, M2) sends "có về sớm ko ạ?" (NO bot mention).
+	msgLuong := protocol.NewGroupMessage(botUID, protocol.TGroupMessage{
+		TMessage: protocol.TMessage{
+			MsgID:   "M2",
+			UIDFrom: "u-luong",
+			IDTo:    "group-zalo-1",
+			DName:   "Nguyễn Lương",
+			Content: textContent("có về sớm ko ạ?"),
+		},
+		Mentions: nil,
+	})
+	ch.handleGroupMessage(msgLuong)
+
+	// Verify M2 did NOT generate an inbound event to the agent
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel2()
+	if unexpected, ok := msgBus.ConsumeInbound(ctx2); ok {
+		t.Fatalf("unexpected inbound message for Nguyen Luong: %+v", unexpected)
+	}
+
+	// CRITICAL ASSERTION 1: M2 must NOT be stored in inboundRefs!
+	if _, ok := ch.loadInboundRef("group-zalo-1", "M2"); ok {
+		t.Fatal("Nguyen Luong's message (M2) was incorrectly recorded in inboundRefs!")
+	}
+
+	// CRITICAL ASSERTION 2: Anh Hiển's message (M1) must still be recorded in inboundRefs!
+	refHien, ok := ch.loadInboundRef("group-zalo-1", "M1")
+	if !ok {
+		t.Fatal("Anh Hien's message (M1) missing from inboundRefs")
+	}
+	if refHien.senderID != "u-hien" || refHien.senderName != "Anh Hiển" {
+		t.Fatalf("inboundRef has wrong sender: ID=%q, Name=%q", refHien.senderID, refHien.senderName)
+	}
+
+	// CRITICAL ASSERTION 3: When outbound message is routed with reply_to_message_id = "M1":
+	outMeta := channels.CopyFinalRoutingMeta(inboundHien.Metadata)
+	outMeta["reply_to_message_id"] = inboundHien.Metadata["message_id"]
+	replyMsgID := resolveReplyMsgID(outMeta)
+	if replyMsgID != "M1" {
+		t.Fatalf("resolved replyMsgID = %q, want M1", replyMsgID)
+	}
+
+	resolvedRef, ok := ch.loadInboundRef(inboundHien.ChatID, replyMsgID)
+	if !ok {
+		t.Fatalf("failed to load inbound ref for chat %s and msgID %s", inboundHien.ChatID, replyMsgID)
+	}
+	if resolvedRef.senderName != "Anh Hiển" {
+		t.Fatalf("resolved sender = %q, want 'Anh Hiển' (must not be Nguyễn Lương!)", resolvedRef.senderName)
+	}
+
+	// Verify group mention prepends/tags Anh Hiển, not Nguyễn Lương
+	replyContent, mentions := prepareGroupMentions("Dạ em ăn rồi nha anh Hiển", resolvedRef.senderID, resolvedRef.senderName)
+	if !strings.Contains(replyContent, "@Anh Hiển") {
+		t.Fatalf("replyContent missing @Anh Hiển: %q", replyContent)
+	}
+	if strings.Contains(replyContent, "Nguyễn Lương") {
+		t.Fatalf("replyContent incorrectly mentions Nguyễn Lương: %q", replyContent)
+	}
+	if len(mentions) != 1 || mentions[0].UID != "u-hien" {
+		t.Fatalf("mentions wrong: %+v", mentions)
+	}
+}
+
+func TestHandleDM_RecordsInboundRefWithZaloReplyMsgID(t *testing.T) {
+	msgBus := bus.New()
+	ch, err := New(config.ZaloPersonalConfig{
+		DMPolicy: "open",
+	}, msgBus, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := protocol.NewUserMessage("bot", protocol.TMessage{
+		MsgID:   "dm-100",
+		UIDFrom: "u-alice",
+		IDTo:    "bot",
+		DName:   "Alice",
+		Content: textContent("Hello in DM"),
+	})
+	ch.handleDM(msg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	inbound, ok := msgBus.ConsumeInbound(ctx)
+	if !ok {
+		t.Fatal("expected inbound for DM")
+	}
+	if inbound.Metadata["zalo_reply_msg_id"] != "dm-100" {
+		t.Fatalf("zalo_reply_msg_id = %q, want dm-100", inbound.Metadata["zalo_reply_msg_id"])
+	}
+
+	ref, ok := ch.loadInboundRef("u-alice", "dm-100")
+	if !ok {
+		t.Fatal("DM inbound ref missing")
+	}
+	if ref.senderID != "u-alice" || ref.senderName != "Alice" {
+		t.Fatalf("wrong DM ref: %+v", ref)
+	}
+
+	// Simulate CopyFinalRoutingMeta (which preserves zalo_reply_msg_id even without isGroup)
+	finalMeta := channels.CopyFinalRoutingMeta(inbound.Metadata)
+	replyMsgID := resolveReplyMsgID(finalMeta)
+	if replyMsgID != "dm-100" {
+		t.Fatalf("resolved replyMsgID = %q, want dm-100", replyMsgID)
+	}
+}
+
+func TestSend_ReplyTargetVersusProactive(t *testing.T) {
+	var requestedPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPaths = append(requestedPaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"error_code": 0}`))
+	}))
+	defer server.Close()
+
+	ch, err := New(config.ZaloPersonalConfig{
+		DMPolicy:    "open",
+		GroupPolicy: "open",
+	}, bus.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch.SetRunning(true)
+
+	sess := protocol.NewSession()
+	sess.SecretKey = base64.StdEncoding.EncodeToString(make([]byte, 32))
+	sess.LoginInfo = &protocol.LoginInfo{
+		ZpwServiceMapV3: protocol.ZpwServiceMapV3{
+			Group: []string{server.URL},
+			Chat:  []string{server.URL},
+		},
+	}
+	ch.sess = sess
+
+	// Store an old message in group-1 from "old-user"
+	ch.rememberInboundRef("group-1", "u-old", "Old User", protocol.TMessage{MsgID: "M-old"}, "câu cũ")
+
+	// 1. Proactive send (from Cron or message tool): no reply_to_message_id, no zalo_reply_msg_id
+	requestedPaths = nil
+	proactiveMsg := bus.OutboundMessage{
+		ChatID:   "group-1",
+		Content:  "Bản tin sáng",
+		Metadata: map[string]string{"group_id": "group-1"},
+	}
+	if err := ch.Send(context.Background(), proactiveMsg); err != nil {
+		t.Fatalf("Send proactive failed: %v", err)
+	}
+	if len(requestedPaths) != 1 || requestedPaths[0] != "/api/group/sendmsg" {
+		t.Fatalf("proactive message must use /api/group/sendmsg (plain), got %v", requestedPaths)
+	}
+
+	// 2. Targeted reply to M-old
+	requestedPaths = nil
+	replyMsg := bus.OutboundMessage{
+		ChatID:  "group-1",
+		Content: "Chào bạn",
+		Metadata: map[string]string{
+			"group_id":            "group-1",
+			"reply_to_message_id": "M-old",
+		},
+	}
+	if err := ch.Send(context.Background(), replyMsg); err != nil {
+		t.Fatalf("Send reply failed: %v", err)
+	}
+	if len(requestedPaths) != 1 || requestedPaths[0] != "/api/group/quote" {
+		t.Fatalf("targeted reply message must use /api/group/quote, got %v", requestedPaths)
+	}
+
+	// 3. Followup split bubble: original had zalo_reply_msg_id, but followup passed through CopyFollowupRoutingMeta
+	requestedPaths = nil
+	inboundMeta := map[string]string{
+		"group_id":          "group-1",
+		"zalo_reply_msg_id": "M-old",
+	}
+	followupMeta := channels.CopyFollowupRoutingMeta(inboundMeta)
+	followupMsg := bus.OutboundMessage{
+		ChatID:   "group-1",
+		Content:  "Phần tiếp theo của câu trả lời",
+		Metadata: followupMeta,
+	}
+	if err := ch.Send(context.Background(), followupMsg); err != nil {
+		t.Fatalf("Send followup failed: %v", err)
+	}
+	if len(requestedPaths) != 1 || requestedPaths[0] != "/api/group/sendmsg" {
+		t.Fatalf("followup split message must use /api/group/sendmsg (plain, no quote), got %v", requestedPaths)
+	}
 }

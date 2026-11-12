@@ -26,7 +26,8 @@ var routingMetaKeys = []string{
 }
 
 var finalReplyMetaKeys = append([]string{
-	"placeholder_key", // final outbound can update placeholder; block replies must not
+	"placeholder_key",   // final outbound can update placeholder; block replies must not
+	"zalo_reply_msg_id", // zalo personal: only first final reply quotes/mentions the inbound message
 }, routingMetaKeys...)
 
 func copySelectedMeta(src map[string]string, keys []string) map[string]string {

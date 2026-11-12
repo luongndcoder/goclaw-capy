@@ -24,7 +24,7 @@ type Channel struct {
 	config      config.ZaloPersonalConfig
 	typingCtrls sync.Map // threadID → *typing.Controller
 	replyCache  *replycontext.Cache
-	inboundRefs sync.Map // chatID → inboundRef (last inbound message, for quote-reply)
+	inboundRefs *inboundRefStore // (chatID, msgID) → inboundRef (bounded FIFO for quote-reply)
 
 	mu       sync.RWMutex // protects sess and listener
 	sess     *protocol.Session
@@ -63,6 +63,7 @@ func New(cfg config.ZaloPersonalConfig, msgBus *bus.MessageBus, pairingSvc store
 		BaseChannel: base,
 		config:      cfg,
 		replyCache:  replycontext.NewCache(replycontext.DefaultOptions()),
+		inboundRefs: newInboundRefStore(defaultMaxInboundRefs),
 		stopCh:      make(chan struct{}),
 	}
 	ch.SetPairingService(pairingSvc)
@@ -203,6 +204,12 @@ func (c *Channel) Stop(_ context.Context) error {
 	})
 	if c.replyCache != nil {
 		c.replyCache.Clear()
+	}
+	c.mu.RLock()
+	refs := c.inboundRefs
+	c.mu.RUnlock()
+	if refs != nil {
+		refs.clear()
 	}
 	if ln := c.getListener(); ln != nil {
 		ln.Stop()
