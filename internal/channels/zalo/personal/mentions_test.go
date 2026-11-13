@@ -1,6 +1,7 @@
 package personal
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal/protocol"
@@ -161,5 +162,193 @@ func TestFilterMentionsForChunk(t *testing.T) {
 	filtered := filterMentionsForChunk(mentions, chunk)
 	if len(filtered) != 1 || filtered[0].UID != "1" {
 		t.Errorf("filtered wrong: %+v", filtered)
+	}
+}
+
+func TestPrepareGroupMentions_HonorificPrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		senderID   string
+		senderName string
+		wantTag    string
+		wantPos    int
+	}{
+		{
+			name:       "Anh Hiển",
+			body:       "Chào @Anh Hiển, chúc ngày mới tốt lành!",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@Anh Hiển",
+			wantPos:    utf16Len("Chào "),
+		},
+		{
+			name:       "Chị Bông",
+			body:       "@Chị Bông ơi, việc xong rồi nha",
+			senderID:   "u-bong",
+			senderName: "Bông",
+			wantTag:    "@Chị Bông",
+			wantPos:    0,
+		},
+		{
+			name:       "All lowercase honorific and name",
+			body:       "Dạ @chị bông",
+			senderID:   "u-bong",
+			senderName: "Bông",
+			wantTag:    "@chị bông",
+			wantPos:    utf16Len("Dạ "),
+		},
+		{
+			name:       "All uppercase honorific",
+			body:       "@ANH HIỂN",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@ANH HIỂN",
+			wantPos:    0,
+		},
+		{
+			name:       "Honorific sếp",
+			body:       "Báo cáo gửi @Sếp Hiển rồi ạ",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@Sếp Hiển",
+			wantPos:    utf16Len("Báo cáo gửi "),
+		},
+		{
+			name:       "Honorific sep without accent",
+			body:       "Dạ @sep Hiển",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@sep Hiển",
+			wantPos:    utf16Len("Dạ "),
+		},
+		{
+			name:       "Honorific thầy / thay",
+			body:       "Chào @Thầy Hiển",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@Thầy Hiển",
+			wantPos:    utf16Len("Chào "),
+		},
+		{
+			name:       "Honorific bác / chú / cô / em / bạn",
+			body:       "@bác Hiển @chú Hiển @cô Hiển @em Hiển @bạn Hiển",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@bác Hiển",
+			wantPos:    0,
+		},
+		{
+			name:       "Honorific Mr with dot",
+			body:       "Hello @Mr. Hiển!",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@Mr. Hiển",
+			wantPos:    utf16Len("Hello "),
+		},
+		{
+			name:       "Honorific Dr without dot",
+			body:       "Hello @Dr Hiển!",
+			senderID:   "u-hien",
+			senderName: "Hiển",
+			wantTag:    "@Dr Hiển",
+			wantPos:    utf16Len("Hello "),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, mentions := prepareGroupMentions(tt.body, tt.senderID, tt.senderName)
+			if gotText != tt.body {
+				t.Errorf("gotText changed unexpectedly: got %q, want %q", gotText, tt.body)
+			}
+			if len(mentions) == 0 {
+				t.Fatalf("expected mentions, got none")
+			}
+			if mentions[0].UID != tt.senderID {
+				t.Errorf("UID = %q, want %q", mentions[0].UID, tt.senderID)
+			}
+			if mentions[0].Pos != tt.wantPos {
+				t.Errorf("Pos = %d, want %d", mentions[0].Pos, tt.wantPos)
+			}
+			wantLen := utf16Len(tt.wantTag)
+			if mentions[0].Len != wantLen {
+				t.Errorf("Len = %d, want %d (%s)", mentions[0].Len, wantLen, tt.wantTag)
+			}
+		})
+	}
+}
+
+func TestPrepareGroupMentions_HonorificInBody_PreventsPrepend(t *testing.T) {
+	body := "Chào cả nhà!\n@Anh Hiển có rảnh không ạ?"
+	senderID := "u-hien"
+	senderName := "Hiển"
+
+	gotText, mentions := prepareGroupMentions(body, senderID, senderName)
+	if gotText != body {
+		t.Fatalf("prepended duplicate tag; got %q, want %q", gotText, body)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+	if mentions[0].UID != senderID {
+		t.Errorf("UID = %q, want %q", mentions[0].UID, senderID)
+	}
+	expectedPos := utf16Len("Chào cả nhà!\n")
+	if mentions[0].Pos != expectedPos {
+		t.Errorf("Pos = %d, want %d", mentions[0].Pos, expectedPos)
+	}
+	expectedLen := utf16Len("@Anh Hiển")
+	if mentions[0].Len != expectedLen {
+		t.Errorf("Len = %d, want %d", mentions[0].Len, expectedLen)
+	}
+}
+
+func TestPrepareGroupMentions_MultipleMentionsMixedHonorific(t *testing.T) {
+	body := "@Anh Hiển xem lại file này nhé, cảm ơn @Hiển nhiều!"
+	senderID := "u-hien"
+	senderName := "Hiển"
+
+	gotText, mentions := prepareGroupMentions(body, senderID, senderName)
+	if gotText != body {
+		t.Errorf("gotText = %q, want %q", gotText, body)
+	}
+	if len(mentions) != 2 {
+		t.Fatalf("expected 2 mentions, got %d", len(mentions))
+	}
+	// First mention: @Anh Hiển at 0
+	if mentions[0].Pos != 0 || mentions[0].Len != utf16Len("@Anh Hiển") {
+		t.Errorf("m1 mismatch: %+v", mentions[0])
+	}
+	// Second mention: @Hiển
+	expectedPos2 := utf16Len("@Anh Hiển xem lại file này nhé, cảm ơn ")
+	if mentions[1].Pos != expectedPos2 || mentions[1].Len != utf16Len("@Hiển") {
+		t.Errorf("m2 mismatch: %+v (want pos %d, len %d)", mentions[1], expectedPos2, utf16Len("@Hiển"))
+	}
+}
+
+func TestPrepareGroupMentions_NonMatchingHonorificDoesNotMatch(t *testing.T) {
+	// Text mentions @Anh Tuấn, but target sender is Hiển.
+	// Since text starts with @, it does not prepend @Hiển.
+	body := "@Anh Tuấn ơi xem nhé"
+	senderID := "u-hien"
+	senderName := "Hiển"
+
+	gotText, mentions := prepareGroupMentions(body, senderID, senderName)
+	if gotText != body {
+		t.Errorf("gotText = %q, want %q", gotText, body)
+	}
+	if len(mentions) != 0 {
+		t.Errorf("expected 0 mentions for Hiển, got %d", len(mentions))
+	}
+
+	// Text later mentions @Anh Tuấn, target is Hiển. Should prepend @Hiển.
+	body2 := "Xin chào cả nhà, @Anh Tuấn ơi xem nhé"
+	gotText2, mentions2 := prepareGroupMentions(body2, senderID, senderName)
+	if !strings.HasPrefix(gotText2, "@Hiển ") {
+		t.Errorf("expected prepend @Hiển, got %q", gotText2)
+	}
+	if len(mentions2) != 1 || mentions2[0].Pos != 0 || mentions2[0].UID != senderID {
+		t.Errorf("expected 1 prepended mention for Hiển, got %+v", mentions2)
 	}
 }

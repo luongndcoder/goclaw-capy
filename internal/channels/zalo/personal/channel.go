@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -35,6 +36,10 @@ type Channel struct {
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	// Test hooks (nil in production).
+	restartFn func(ctx context.Context) error
+	sleepFn   func(ctx context.Context, d time.Duration) bool
 }
 
 // New creates a new Zalo Personal channel from config.

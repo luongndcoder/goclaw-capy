@@ -16,13 +16,19 @@ import (
 
 const maxTextLength = 2000
 
-const (
+var (
 	// zaloChunkPacing spaces multi-bubble answers so they read (and deliver)
 	// in order instead of arriving as an instant burst.
 	zaloChunkPacing = 400 * time.Millisecond
 	// zaloChunkRetryDelay waits before the single retry of a failed chunk.
 	zaloChunkRetryDelay = time.Second
 )
+
+// mentionTarget identifies the user to @-mention in group replies.
+type mentionTarget struct {
+	senderID   string
+	senderName string
+}
 
 // Send delivers an outbound message to a Zalo chat.
 func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
@@ -88,7 +94,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	// the triggering inbound message when known (threaded context); groups
 	// additionally @-mention the asker.
 	var quote *protocol.QuoteRef
-	var mentions []protocol.Mention
+	var target mentionTarget
 	replyMsgID := resolveReplyMsgID(msg.Metadata)
 	if replyMsgID != "" {
 		if ref, ok := c.loadInboundRef(msg.ChatID, replyMsgID); ok {
@@ -99,12 +105,15 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 				if name == "" {
 					name = ref.senderID
 				}
-				msg.Content, mentions = prepareGroupMentions(msg.Content, ref.senderID, name)
+				target = mentionTarget{
+					senderID:   ref.senderID,
+					senderName: name,
+				}
 			}
 		}
 	}
 	if msg.Content != "" {
-		return c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content, quote, mentions)
+		return c.sendChunkedText(ctx, sess, msg.ChatID, threadType, msg.Content, quote, target)
 	}
 	return nil
 }
@@ -135,7 +144,7 @@ func (c *Channel) sendFile(ctx context.Context, sess *protocol.Session, chatID s
 	return err
 }
 
-func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, text string, quote *protocol.QuoteRef, mentions []protocol.Mention) error {
+func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, chatID string, threadType protocol.ThreadType, text string, quote *protocol.QuoteRef, target mentionTarget) error {
 	chunks := channels.ChunkMarkdown(text, maxTextLength)
 	for i, chunk := range chunks {
 		// Pacing: rapid-fire bubbles feel robotic and risk tripping Zalo's
@@ -147,14 +156,17 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 			case <-time.After(zaloChunkPacing):
 			}
 		}
-		// Only the first chunk carries the quote/mention; the rest are plain
-		// continuations. Delivery degrades gracefully: quote → mention-only
-		// (group) → plain, so the reply is never lost to a malformed
-		// quote/mention payload.
+		// The first chunk carries the quote/mention; continuations retain
+		// user mentions when present. Delivery degrades gracefully: quote →
+		// mention-only (group) → plain, so the reply is never lost to a
+		// malformed quote/mention payload.
 		var err error
 		sent := false
 		if i == 0 {
-			chunkMentions := filterMentionsForChunk(mentions, chunk)
+			var chunkMentions []protocol.Mention
+			if threadType == protocol.ThreadTypeGroup && target.senderID != "" {
+				chunk, chunkMentions = prepareGroupMentions(chunk, target.senderID, target.senderName)
+			}
 			if quote != nil {
 				err = c.sendChunkWithRetryQuote(ctx, sess, chatID, threadType, chunk, quote, chunkMentions)
 				if err == nil {
@@ -171,6 +183,20 @@ func (c *Channel) sendChunkedText(ctx context.Context, sess *protocol.Session, c
 				} else {
 					slog.Warn("zalo_personal: mention send failed, falling back to plain",
 						"chat_id", chatID, "error", err)
+				}
+			}
+		} else {
+			// Continuation chunks (i > 0) keep real Zalo mentions when the target is mentioned.
+			if threadType == protocol.ThreadTypeGroup && target.senderID != "" {
+				chunkMentions := findMentions(chunk, target.senderID, target.senderName)
+				if len(chunkMentions) > 0 {
+					err = c.sendChunkWithRetryMention(ctx, sess, chatID, chunk, chunkMentions)
+					if err == nil {
+						sent = true
+					} else {
+						slog.Warn("zalo_personal: continuation mention send failed, falling back to plain",
+							"chat_id", chatID, "error", err)
+					}
 				}
 			}
 		}

@@ -8,9 +8,32 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal/protocol"
 )
 
+var commonHonorifics = map[string]struct{}{
+	"anh":  {},
+	"chị":  {},
+	"chi":  {},
+	"em":   {},
+	"bác":  {},
+	"bac":  {},
+	"chú":  {},
+	"chu":  {},
+	"cô":   {},
+	"co":   {},
+	"thầy": {},
+	"thay": {},
+	"sếp":  {},
+	"sep":  {},
+	"bạn":  {},
+	"ban":  {},
+	"mr":   {},
+	"mrs":  {},
+	"ms":   {},
+	"dr":   {},
+}
+
 // prepareGroupMentions inspects outbound group text and ensures the target user is @mentioned:
-// 1. If text already contains "@<name>" (case-insensitive at word boundaries), all occurrences
-//    are converted into protocol.Mention spans with accurate UTF-16 offsets without prepending.
+// 1. If text already contains "@<name>" or "@<honorific> <name>" (case-insensitive at word boundaries),
+//    all occurrences are converted into protocol.Mention spans with accurate UTF-16 offsets without prepending.
 // 2. If text starts with an '@' mention tag (e.g. "@all", "@everyone", or another mention),
 //    we avoid prepending a duplicate or conflicting "@<name> " prefix.
 // 3. Otherwise (no mention of user in text), "@<name> " is prepended at index 0 and a
@@ -45,10 +68,14 @@ func prepareGroupMentions(content, senderID, senderName string) (string, []proto
 	}
 }
 
-// findMentions locates all occurrences of "@<senderName>" in content and returns
-// their protocol.Mention representations with UTF-16 Pos and Len.
+// findMentions locates all occurrences of "@<senderName>" or "@<honorific> <senderName>"
+// in content and returns their protocol.Mention representations with UTF-16 Pos and Len.
 func findMentions(content, senderID, senderName string) []protocol.Mention {
-	if senderID == "" || senderName == "" || content == "" {
+	if senderID == "" || content == "" {
+		return nil
+	}
+	senderName = strings.TrimSpace(strings.TrimPrefix(senderName, "@"))
+	if senderName == "" {
 		return nil
 	}
 
@@ -58,7 +85,6 @@ func findMentions(content, senderID, senderName string) []protocol.Mention {
 		return nil
 	}
 
-	tagLenRunes := 1 + len(nameRunes) // '@' + name
 	var mentions []protocol.Mention
 
 	// Precompute cumulative UTF-16 code-unit offsets for each rune index.
@@ -71,7 +97,7 @@ func findMentions(content, senderID, senderName string) []protocol.Mention {
 	}
 	utf16Offsets[len(contentRunes)] = currentU16
 
-	for i := 0; i <= len(contentRunes)-tagLenRunes; i++ {
+	for i := 0; i < len(contentRunes); i++ {
 		// Must start with '@'
 		if contentRunes[i] != '@' {
 			continue
@@ -82,29 +108,66 @@ func findMentions(content, senderID, senderName string) []protocol.Mention {
 			continue
 		}
 
-		// Check if following runes match senderName (case-insensitive Unicode fold)
-		candidate := contentRunes[i+1 : i+tagLenRunes]
-		if !strings.EqualFold(string(candidate), senderName) {
-			continue
+		matchedEndRune := -1
+
+		// 1. Exact match check: "@<senderName>"
+		tagLenRunes := 1 + len(nameRunes)
+		if i+tagLenRunes <= len(contentRunes) {
+			candidate := contentRunes[i+1 : i+tagLenRunes]
+			if strings.EqualFold(string(candidate), senderName) {
+				afterIdx := i + tagLenRunes
+				if afterIdx == len(contentRunes) || !isWordRune(contentRunes[afterIdx]) {
+					matchedEndRune = afterIdx
+				}
+			}
 		}
 
-		// Boundary check after senderName: end of string or delimiter (not a word character)
-		afterIdx := i + tagLenRunes
-		if afterIdx < len(contentRunes) && isWordRune(contentRunes[afterIdx]) {
-			continue
+		// 2. If exact match not found, check honorific: "@<honorific> <senderName>"
+		if matchedEndRune == -1 {
+			j := i + 1
+			for j < len(contentRunes) && isWordRune(contentRunes[j]) {
+				j++
+			}
+			if j > i+1 {
+				word := strings.ToLower(string(contentRunes[i+1 : j]))
+				if _, isHonorific := commonHonorifics[word]; isHonorific {
+					hasSep := false
+					hEnd := j
+					if hEnd < len(contentRunes) && contentRunes[hEnd] == '.' {
+						hEnd++
+						hasSep = true
+					}
+					k := hEnd
+					for k < len(contentRunes) && (contentRunes[k] == ' ' || contentRunes[k] == '\t') {
+						k++
+						hasSep = true
+					}
+					if hasSep && k+len(nameRunes) <= len(contentRunes) {
+						candidate := contentRunes[k : k+len(nameRunes)]
+						if strings.EqualFold(string(candidate), senderName) {
+							afterIdx := k + len(nameRunes)
+							if afterIdx == len(contentRunes) || !isWordRune(contentRunes[afterIdx]) {
+								matchedEndRune = afterIdx
+							}
+						}
+					}
+				}
+			}
 		}
 
-		pos := utf16Offsets[i]
-		tagU16Len := utf16Offsets[afterIdx] - pos
+		if matchedEndRune != -1 {
+			pos := utf16Offsets[i]
+			tagU16Len := utf16Offsets[matchedEndRune] - pos
 
-		mentions = append(mentions, protocol.Mention{
-			Pos: pos,
-			Len: tagU16Len,
-			UID: senderID,
-		})
+			mentions = append(mentions, protocol.Mention{
+				Pos: pos,
+				Len: tagU16Len,
+				UID: senderID,
+			})
 
-		// Advance past this match
-		i += tagLenRunes - 1
+			// Advance past this match (for loop will i++)
+			i = matchedEndRune - 1
+		}
 	}
 
 	return mentions
@@ -126,7 +189,7 @@ func filterMentionsForChunk(mentions []protocol.Mention, chunk string) []protoco
 }
 
 func isWordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r)
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
 
 func utf16RuneLen(r rune) int {

@@ -10,10 +10,32 @@ import (
 )
 
 const (
-	maxChannelRestarts   = 10
-	maxChannelBackoff    = 60 * time.Second
-	code3000InitialDelay = 60 * time.Second
+	maxChannelRestarts     = 10
+	maxChannelBackoff      = 60 * time.Second
+	extendedChannelBackoff = 5 * time.Minute
+	code3000InitialDelay   = 60 * time.Second
 )
+
+func channelRestartDelay(attempt int) time.Duration {
+	if attempt < maxChannelRestarts {
+		return min(time.Duration(1<<uint(attempt+1))*time.Second, maxChannelBackoff)
+	}
+	return extendedChannelBackoff
+}
+
+func (c *Channel) sleepContext(ctx context.Context, d time.Duration) bool {
+	if c.sleepFn != nil {
+		return c.sleepFn(ctx, d)
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-c.stopCh:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
 
 func (c *Channel) listenLoop(ctx context.Context) {
 	defer c.SetRunning(false)
@@ -56,12 +78,8 @@ func (c *Channel) runListenerLoop(ctx context.Context) bool {
 			// Code 3000: wait 60s before retry (duplicate session may be transient)
 			if ci.Code == protocol.CloseCodeDuplicate {
 				slog.Warn("zalo_personal duplicate session (code 3000), waiting before retry", "channel", c.Name())
-				select {
-				case <-ctx.Done():
+				if !c.sleepContext(ctx, code3000InitialDelay) {
 					return false
-				case <-c.stopCh:
-					return false
-				case <-time.After(code3000InitialDelay):
 				}
 			}
 
@@ -77,28 +95,34 @@ func (c *Channel) runListenerLoop(ctx context.Context) bool {
 // This is the channel-level retry layer for auth/session failures. The listener
 // has its own internal retry for transient WS disconnects (endpoint rotation).
 // When the listener exhausts its retries, it emits to closedCh which triggers this.
+// For the first maxChannelRestarts (10) attempts, it uses exponential backoff up to maxChannelBackoff (60s).
+// After 10 failed attempts, it logs a warning once and continues retrying at extendedChannelBackoff (5m)
+// indefinitely until ctx.Done() or c.stopCh is closed.
 // Returns true if restart succeeded and the listen loop should continue.
 func (c *Channel) restartWithBackoff(ctx context.Context) bool {
-	for attempt := range maxChannelRestarts {
-		delay := min(time.Duration(1<<uint(attempt+1))*time.Second, maxChannelBackoff)
+	for attempt := 0; ; attempt++ {
+		delay := channelRestartDelay(attempt)
+		if attempt == maxChannelRestarts {
+			slog.Warn("zalo_personal reached max initial restart attempts, continuing with extended backoff",
+				"attempts", attempt, "extendedBackoff", extendedChannelBackoff, "channel", c.Name())
+		}
 		slog.Info("zalo_personal restarting channel", "attempt", attempt+1, "delay", delay, "channel", c.Name())
 
-		select {
-		case <-ctx.Done():
+		if !c.sleepContext(ctx, delay) {
 			return false
-		case <-c.stopCh:
-			return false
-		case <-time.After(delay):
 		}
 
-		if err := c.restart(ctx); err != nil {
+		restartFn := c.restart
+		if c.restartFn != nil {
+			restartFn = c.restartFn
+		}
+
+		if err := restartFn(ctx); err != nil {
 			slog.Warn("zalo_personal restart failed", "attempt", attempt+1, "error", err)
 			continue
 		}
 		return true
 	}
-	slog.Error("zalo_personal channel gave up after max restart attempts", "channel", c.Name())
-	return false
 }
 
 // restart performs a full re-authentication and listener restart.
